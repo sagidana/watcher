@@ -25,7 +25,7 @@ import aiosqlite
 
 from .config import Settings
 from .fetchers.browser import BrowserFetcher, ElementNotFoundError
-from .notifier import notify_change
+from .notifier import build_short_diff, notify_change
 from .watchers_config import WatcherConfig, load_all
 
 log = logging.getLogger("watcher.engine")
@@ -164,7 +164,7 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
                     log.info("[watch:%s] change detected", watcher.id)
                     should_notify = True
                     if watcher.prompt:
-                        diff = f"OLD:\n{last_text or ''}\n\nNEW:\n{text}"
+                        diff = build_short_diff(last_text or "", text)
                         should_notify = await _cai_filter(watcher.id, watcher.prompt, diff)
                         if not should_notify:
                             log.info("[watch:%s] cai filter suppressed notification", watcher.id)
