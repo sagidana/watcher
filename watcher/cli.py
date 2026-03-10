@@ -270,6 +270,16 @@ def _ensure_config_dir() -> None:
             yaml_dest.write_text("watchers: []\n")
             console.print(f"[green]✓[/green] Created empty [cyan]{yaml_dest}[/cyan]")
 
+    settings_dest = CONFIG_DIR / "settings.yaml"
+    if not settings_dest.exists():
+        settings_dest.write_text(
+            "telegram:\n"
+            "  # Seconds Telegram holds each long-poll request open (1-55).\n"
+            "  # Higher = fewer API calls; lower = slightly faster cold-start response.\n"
+            "  poll_timeout: 30\n"
+        )
+        console.print(f"[green]✓[/green] Created [cyan]{settings_dest}[/cyan]")
+
 
 def _write_unit_file() -> None:
     """Generate and write the systemd unit file from the template."""

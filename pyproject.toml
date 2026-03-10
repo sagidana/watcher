@@ -9,7 +9,7 @@ description = "Personal web-change monitoring service with Telegram notification
 requires-python = ">=3.11"
 dependencies = [
     # Telegram bot
-    "python-telegram-bot>=21.0",
+    "aiogram>=3.0",
 
     # HTTP fetching
     "requests>=2.32",

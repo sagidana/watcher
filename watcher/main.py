@@ -7,6 +7,9 @@ import asyncio
 import logging
 from pathlib import Path
 
+from .config import load_settings
+from .bot import run_bot
+
 LOG_FILE = Path("/tmp/watcher.log")
 
 logging.basicConfig(
@@ -22,13 +25,16 @@ log = logging.getLogger("watcher")
 
 async def run() -> None:
     log.info("Watcher starting...")
-    # Phase 2: scheduler and bot will be wired here
-    log.info("Watcher running. Press Ctrl-C to stop.")
+    settings = load_settings()
+
+    bot_task = asyncio.create_task(run_bot(settings), name="telegram-bot")
+
     try:
-        while True:
-            await asyncio.sleep(60)
+        await asyncio.gather(bot_task)
     except asyncio.CancelledError:
-        pass
+        bot_task.cancel()
+        await asyncio.gather(bot_task, return_exceptions=True)
+
     log.info("Watcher stopped.")
 
 
