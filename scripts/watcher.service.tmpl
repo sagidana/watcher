@@ -9,14 +9,14 @@ WorkingDirectory={working_dir}
 ExecStart={python_bin} -m watcher.main
 Restart=on-failure
 RestartSec=10
-EnvironmentFile={working_dir}/.env
+EnvironmentFile={config_dir}/.env
 
 # Limit runaway resource use
 MemoryMax=512M
 
-# Logs go to journald; view with: journalctl --user -u watcher -f
-StandardOutput=journal
-StandardError=journal
+# Logs go to /tmp/watcher.log (via Python logging in main.py)
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=default.target

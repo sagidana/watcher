@@ -10,7 +10,7 @@ Usage:
 """
 
 import argparse
-import os
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -20,14 +20,27 @@ from rich.panel import Panel
 
 console = Console()
 
+# All runtime config/data lives here
+CONFIG_DIR = Path.home() / ".config" / "watcher"
+
 # The systemd user unit directory
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 UNIT_NAME = "watcher.service"
 UNIT_PATH = SYSTEMD_USER_DIR / UNIT_NAME
 
+LOG_FILE = Path("/tmp/watcher.log")
+
+
+def _setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
+    )
+
 
 def _working_dir() -> Path:
-    """Absolute path to the project root (where .env lives)."""
+    """Absolute path to the project root (where the package is installed from)."""
     return Path(__file__).resolve().parent.parent
 
 
@@ -37,13 +50,13 @@ def _python_bin() -> str:
 
 
 def _check_env() -> bool:
-    """Validate that .env exists and required variables are set."""
-    env_file = _working_dir() / ".env"
+    """Validate that ~/.config/watcher/.env exists and required variables are set."""
+    env_file = CONFIG_DIR / ".env"
     if not env_file.exists():
         console.print(
             f"[red]✗[/red] [bold].env[/bold] file not found at [cyan]{env_file}[/cyan]\n"
             f"  Copy the example and fill it in:\n"
-            f"  [bold]cp .env.example .env && $EDITOR .env[/bold]"
+            f"  [bold]cp .env.example {env_file} && $EDITOR {env_file}[/bold]"
         )
         return False
 
@@ -51,7 +64,6 @@ def _check_env() -> bool:
     missing = []
     content = env_file.read_text()
     for key in required:
-        # Check it's set to a non-placeholder value
         found = False
         for line in content.splitlines():
             line = line.strip()
@@ -65,13 +77,31 @@ def _check_env() -> bool:
 
     if missing:
         console.print(
-            f"[red]✗[/red] Missing or unset variables in [bold].env[/bold]: "
+            f"[red]✗[/red] Missing or unset variables in [bold]{env_file}[/bold]: "
             + ", ".join(f"[yellow]{k}[/yellow]" for k in missing)
         )
         return False
 
     console.print("[green]✓[/green] .env looks good")
     return True
+
+
+def _ensure_config_dir() -> None:
+    """Create ~/.config/watcher and seed watchers.yaml if missing."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (CONFIG_DIR / "sessions").mkdir(exist_ok=True)
+
+    yaml_dest = CONFIG_DIR / "watchers.yaml"
+    if not yaml_dest.exists():
+        yaml_src = _working_dir() / "config" / "watchers.yaml"
+        if yaml_src.exists():
+            yaml_dest.write_text(yaml_src.read_text())
+            console.print(
+                f"[green]✓[/green] Created [cyan]{yaml_dest}[/cyan] from example"
+            )
+        else:
+            yaml_dest.write_text("watchers: []\n")
+            console.print(f"[green]✓[/green] Created empty [cyan]{yaml_dest}[/cyan]")
 
 
 def _write_unit_file() -> None:
@@ -82,6 +112,8 @@ def _write_unit_file() -> None:
     unit_content = template.format(
         working_dir=str(_working_dir()),
         python_bin=_python_bin(),
+        config_dir=str(CONFIG_DIR),
+        log_file=str(LOG_FILE),
     )
 
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
@@ -100,11 +132,14 @@ def _run_systemctl(*args: str) -> subprocess.CompletedProcess:
 def cmd_install(_args: argparse.Namespace) -> None:
     console.print(Panel("[bold]Installing watcher service[/bold]", style="blue"))
 
-    # 1. Validate environment
+    # 1. Create config dir
+    _ensure_config_dir()
+
+    # 2. Validate environment
     if not _check_env():
         sys.exit(1)
 
-    # 2. Install Playwright browser
+    # 3. Install Playwright browser
     console.print("\n[bold]Installing Playwright Chromium...[/bold]")
     result = subprocess.run(
         [_python_bin(), "-m", "playwright", "install", "chromium"],
@@ -115,16 +150,16 @@ def cmd_install(_args: argparse.Namespace) -> None:
         sys.exit(1)
     console.print("[green]✓[/green] Playwright Chromium installed")
 
-    # 3. Initialise database
+    # 4. Initialise database
     console.print("\n[bold]Initialising database...[/bold]")
     _init_db()
     console.print("[green]✓[/green] Database initialised")
 
-    # 4. Write systemd unit
+    # 5. Write systemd unit
     console.print("\n[bold]Registering systemd service...[/bold]")
     _write_unit_file()
 
-    # 5. Enable and start
+    # 6. Enable and start
     _run_systemctl("daemon-reload")
     result = _run_systemctl("enable", "--now", UNIT_NAME)
     if result.returncode != 0:
@@ -135,9 +170,10 @@ def cmd_install(_args: argparse.Namespace) -> None:
     console.print(
         Panel(
             "[green][bold]watcher is installed and running.[/bold][/green]\n\n"
-            f"  View logs:   [cyan]journalctl --user -u watcher -f[/cyan]\n"
+            f"  Config dir:   [cyan]{CONFIG_DIR}[/cyan]\n"
+            f"  Logs:         [cyan]tail -f {LOG_FILE}[/cyan]\n"
             f"  Check status: [cyan]watcher status[/cyan]\n"
-            f"  Uninstall:   [cyan]watcher uninstall[/cyan]",
+            f"  Uninstall:    [cyan]watcher uninstall[/cyan]",
             style="green",
         )
     )
@@ -163,8 +199,8 @@ def cmd_uninstall(_args: argparse.Namespace) -> None:
     _run_systemctl("daemon-reload")
 
     console.print(
-        "\n[yellow]Note:[/yellow] Your [bold].env[/bold], [bold]config/[/bold], "
-        "and [bold]storage/[/bold] data have been kept.\n"
+        f"\n[yellow]Note:[/yellow] Your config and data at "
+        f"[cyan]{CONFIG_DIR}[/cyan] have been kept.\n"
         "Run [cyan]watcher install[/cyan] to reinstall."
     )
 
@@ -176,12 +212,11 @@ def cmd_status(_args: argparse.Namespace) -> None:
 
 def cmd_run(_args: argparse.Namespace) -> None:
     """Run the watcher in the foreground (development mode)."""
+    _setup_logging()
     console.print("[bold]Starting watcher in foreground (Ctrl-C to stop)...[/bold]\n")
-    os.chdir(_working_dir())
-    # Load .env manually for foreground runs
     try:
         from dotenv import load_dotenv
-        load_dotenv(_working_dir() / ".env")
+        load_dotenv(CONFIG_DIR / ".env")
     except ImportError:
         pass
     from watcher.main import run
@@ -198,13 +233,11 @@ def cmd_reload(_args: argparse.Namespace) -> None:
 
 
 def _init_db() -> None:
-    """Create storage directory and initialise the SQLite schema."""
-    storage_dir = _working_dir() / "storage"
-    storage_dir.mkdir(exist_ok=True)
-    (storage_dir / "sessions").mkdir(exist_ok=True)
+    """Create config dir and initialise the SQLite schema."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (CONFIG_DIR / "sessions").mkdir(exist_ok=True)
 
-    db_path = storage_dir / "state.db"
-    # Schema bootstrap — run synchronously at install time
+    db_path = CONFIG_DIR / "state.db"
     import sqlite3
     conn = sqlite3.connect(db_path)
     conn.executescript("""

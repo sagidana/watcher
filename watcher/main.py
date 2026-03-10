@@ -5,10 +5,17 @@ Starts the scheduler and Telegram bot in a shared asyncio event loop.
 
 import asyncio
 import logging
+from pathlib import Path
+
+LOG_FILE = Path("/tmp/watcher.log")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler(),
+    ],
 )
 log = logging.getLogger("watcher")
 

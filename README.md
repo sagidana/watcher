@@ -67,15 +67,14 @@ watcher state without restarting the service.
 ## Project Structure
 
 ```
-watcher/
-├── config/
-│   └── watchers.yaml          # your watcher definitions (what to watch)
-│
-├── storage/
-│   ├── state.db               # SQLite: watcher state, hashes, history
-│   └── sessions/              # saved Playwright browser session files
-│                              # (one per authenticated site)
-│
+~/.config/watcher/             # all runtime config and data
+├── .env                       # TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+├── watchers.yaml              # your watcher definitions (what to watch)
+├── state.db                   # SQLite: watcher state, hashes, history
+└── sessions/                  # saved Playwright browser session files
+                               # (one per authenticated site)
+
+watcher/                       # source tree (installed package)
 ├── watcher/                   # core Python package
 │   ├── __init__.py
 │   ├── scheduler.py           # asyncio task scheduler, per-watcher intervals
@@ -121,9 +120,10 @@ git clone <repo> && cd watcher
 # 2. Install the package (creates the `watcher` CLI command)
 pip install -e .
 
-# 3. Copy and fill in environment variables
-cp .env.example .env
-$EDITOR .env          # set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID
+# 3. Create the config directory and fill in credentials
+mkdir -p ~/.config/watcher
+cp .env.example ~/.config/watcher/.env
+$EDITOR ~/.config/watcher/.env   # set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID
 
 # 4. Install as a background systemd service
 watcher install
@@ -133,11 +133,14 @@ watcher status
 ```
 
 `watcher install` does the following automatically:
-- Validates that `.env` is present and required variables are set
+- Creates `~/.config/watcher/` and seeds `watchers.yaml` if missing
+- Validates that `~/.config/watcher/.env` is present and required variables are set
 - Runs `playwright install chromium` to download the headless browser
-- Initialises the SQLite database schema
+- Initialises the SQLite database at `~/.config/watcher/state.db`
 - Writes a `systemd --user` unit file pointing at the current virtualenv
 - Runs `systemctl --user daemon-reload && systemctl --user enable --now watcher`
+
+Logs are written to `/tmp/watcher.log`.
 
 ### Uninstall
 
@@ -146,13 +149,13 @@ watcher uninstall
 ```
 
 This stops the service, disables it, and removes the systemd unit file. Your
-`.env`, `config/`, and `storage/` data are left untouched.
+data at `~/.config/watcher/` is left untouched.
 
 ---
 
 ## Configuration
 
-Watchers are defined in `config/watchers.yaml`:
+Watchers are defined in `~/.config/watcher/watchers.yaml`:
 
 ```yaml
 watchers:
@@ -173,7 +176,7 @@ watchers:
     interval_minutes: 10
     notify_on: any_change
     auth: session                   # none | session | credentials
-    session_file: storage/sessions/example.com.json
+    session_file: sessions/example.com.json
 ```
 
 Each watcher runs independently on its own interval. New watchers can be added
@@ -234,7 +237,7 @@ Handled in layers, most permissive first:
 | `session`     | You log in manually once in a Playwright browser window, the session is saved to a JSON file, reused on every subsequent run. Re-authenticate manually when it expires. |
 | `credentials` | Username/password stored in `.env`, login form automated by Playwright. Not suitable for sites with MFA. |
 
-Session files are stored in `storage/sessions/` and ignored by git.
+Session files are stored in `~/.config/watcher/sessions/` and ignored by git.
 
 ---
 
