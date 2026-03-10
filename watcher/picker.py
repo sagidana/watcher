@@ -111,8 +111,28 @@ _TOOLBAR_JS = r"""
       background: rgba(137,180,250,.10) !important;
       border-radius: 2px !important;
       display: none !important;
-      transition: all .07s ease !important;
+      transition: left .07s ease, top .07s ease, width .07s ease, height .07s ease !important;
     }
+    #__watcher_overlay.wt-selected {
+      outline-color: #a6e3a1 !important;
+      background: rgba(166,227,161,.15) !important;
+    }
+    #__watcher_tooltip {
+      position: fixed !important;
+      pointer-events: none !important;
+      z-index: 2147483647 !important;
+      background: #1e1e2e !important;
+      color: #cdd6f4 !important;
+      font-family: monospace !important;
+      font-size: 11px !important;
+      padding: 3px 7px !important;
+      border-radius: 4px !important;
+      white-space: nowrap !important;
+      display: none !important;
+      border: 1px solid #45475a !important;
+    }
+    #__watcher_tooltip .wt-tag { color: #89b4fa !important; }
+    #__watcher_tooltip .wt-dims { color: #a6e3a1 !important; margin-left: 6px !important; }
   `;
   (document.head || document.documentElement).appendChild(style);
 
@@ -133,6 +153,12 @@ _TOOLBAR_JS = r"""
   const overlay = document.createElement('div');
   overlay.id = '__watcher_overlay';
   document.body.appendChild(overlay);
+
+  // ── tooltip (tag + dimensions) ────────────────────────────────────────
+  const tooltip = document.createElement('div');
+  tooltip.id = '__watcher_tooltip';
+  tooltip.innerHTML = '<span class="wt-tag"></span><span class="wt-dims"></span>';
+  document.body.appendChild(tooltip);
 
   // ── state ─────────────────────────────────────────────────────────────
   let pickedSelector = null;
@@ -210,6 +236,8 @@ _TOOLBAR_JS = r"""
 
   function cancelPicking() {
     overlay.style.display = 'none';
+    overlay.classList.remove('wt-selected');
+    tooltip.style.display = 'none';
     document.removeEventListener('mouseover', onHover, true);
     document.removeEventListener('click', onClick, true);
     document.body.style.cursor = '';
@@ -218,27 +246,52 @@ _TOOLBAR_JS = r"""
     setButtons('<button id="__wt_pick">Pick Element</button>');
   }
 
-  function onHover(e) {
-    const target = e.target;
-    if (bar.contains(target) || target === overlay) return;
-    const r = target.getBoundingClientRect();
-    overlay.style.display = 'block';
+  function positionOverlay(el) {
+    const r = el.getBoundingClientRect();
     overlay.style.left   = r.left   + window.scrollX + 'px';
     overlay.style.top    = r.top    + window.scrollY + 'px';
     overlay.style.width  = r.width  + 'px';
     overlay.style.height = r.height + 'px';
+    return r;
+  }
+
+  function showTooltip(el, r) {
+    const tag = el.tagName.toLowerCase() +
+      (el.id ? '#' + el.id : '') +
+      (el.classList.length ? '.' + Array.from(el.classList).slice(0,2).join('.') : '');
+    tooltip.querySelector('.wt-tag').textContent = tag;
+    tooltip.querySelector('.wt-dims').textContent =
+      Math.round(r.width) + 'x' + Math.round(r.height);
+    // position tooltip just above the overlay, clamp to viewport
+    const ty = Math.max(0, r.top + window.scrollY - 24);
+    tooltip.style.left = Math.min(r.left + window.scrollX, window.innerWidth - 200) + 'px';
+    tooltip.style.top  = ty + 'px';
+    tooltip.style.display = 'block';
+  }
+
+  function onHover(e) {
+    const target = e.target;
+    if (bar.contains(target) || target === overlay || target === tooltip) return;
+    overlay.style.display = 'block';
+    overlay.classList.remove('wt-selected');
+    const r = positionOverlay(target);
+    showTooltip(target, r);
   }
 
   function onClick(e) {
     const target = e.target;
-    if (bar.contains(target) || target === overlay) return;
+    if (bar.contains(target) || target === overlay || target === tooltip) return;
     e.preventDefault();
     e.stopPropagation();
 
     document.removeEventListener('mouseover', onHover, true);
     document.removeEventListener('click', onClick, true);
     document.body.style.cursor = '';
-    overlay.style.display = 'none';
+
+    // keep overlay on the selected element, switch to green
+    overlay.classList.add('wt-selected');
+    const r = positionOverlay(target);
+    showTooltip(target, r);
 
     pickedSelector = uniqueSelector(target);
 
