@@ -6,15 +6,19 @@ Usage:
     watcher uninstall
     watcher status
     watcher run          (foreground, for development)
-    watcher reload       (reload watchers.yaml without restart)
+    watcher reload       (reload watchers without restart)
+    watcher watch        (open browser picker to add a new watcher)
 """
 
 import argparse
+import asyncio
 import importlib.resources
 import logging
+import secrets
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -403,6 +407,67 @@ def cmd_run(_args: argparse.Namespace) -> None:
     asyncio.run(run())
 
 
+def cmd_watch(_args: argparse.Namespace) -> None:
+    """Open a headed browser, let the user pick a DOM element, save a watcher."""
+    _setup_logging()
+
+    # Load .env so settings are available
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(CONFIG_DIR / ".env")
+    except ImportError:
+        pass
+
+    # Ensure watchers directory exists
+    watchers_dir = CONFIG_DIR / "watchers"
+    watchers_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(
+        "[bold]Opening browser…[/bold]\n"
+        "Navigate to the page you want to watch, then click [cyan]Pick Element[/cyan] "
+        "in the toolbar and click on the element you want to monitor."
+    )
+
+    try:
+        from watcher.picker import pick_element
+        result = asyncio.run(pick_element())
+    except RuntimeError as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        sys.exit(1)
+
+    console.print(
+        f"\n[green]✓[/green] Selected: [cyan]{result.selector}[/cyan]\n"
+        f"   Page: {result.url}"
+    )
+
+    from watcher.watchers_config import WatcherConfig, save
+
+    watcher_id = secrets.token_hex(4)
+    name = result.title or result.url
+    w = WatcherConfig(
+        id=watcher_id,
+        name=name,
+        url=result.url,
+        selector=result.selector,
+        interval=30,
+        enabled=True,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    save(w)
+
+    console.print(
+        f"[green]✓[/green] Watcher saved: [bold]{w.name}[/bold] → [cyan]{w.selector}[/cyan]\n"
+        f"   File: [dim]{CONFIG_DIR / 'watchers' / (watcher_id + '.yaml')}[/dim]\n"
+        "The background service will pick it up within 30 seconds."
+    )
+
+    # Signal running service to rescan
+    subprocess.run(
+        ["systemctl", "--user", "reload-or-restart", UNIT_NAME],
+        capture_output=True,
+    )
+
+
 def cmd_reload(_args: argparse.Namespace) -> None:
     result = _run_systemctl("reload-or-restart", UNIT_NAME)
     if result.returncode == 0:
@@ -461,6 +526,7 @@ def main() -> None:
     sub.add_parser("status", help="Show service status")
     sub.add_parser("run", help="Run in foreground (development)")
     sub.add_parser("reload", help="Reload watchers config without full restart")
+    sub.add_parser("watch", help="Open browser picker to add a new watcher")
 
     args = parser.parse_args()
 
@@ -470,6 +536,7 @@ def main() -> None:
         "status": cmd_status,
         "run": cmd_run,
         "reload": cmd_reload,
+        "watch": cmd_watch,
     }
     commands[args.command](args)
 
