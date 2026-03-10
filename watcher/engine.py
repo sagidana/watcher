@@ -71,44 +71,57 @@ async def _record_run(watcher_id: str, status: str, detail: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
-    log.info("Starting watcher: %s (%s)", watcher.name, watcher.id)
+    log.info("[watch:%s] task started", watcher.id)
     fetcher = BrowserFetcher()
 
     try:
+        log.info("[watch:%s] launching browser fetcher", watcher.id)
         await fetcher.start(watcher.url, watcher.selector)
+        log.info("[watch:%s] browser fetcher ready", watcher.id)
     except Exception:
-        log.exception("Failed to start fetcher for watcher %s", watcher.id)
+        log.exception("[watch:%s] failed to start fetcher", watcher.id)
         await _record_run(watcher.id, "error", "Failed to start fetcher")
         return
 
     last_hash, last_text = await _get_snapshot(watcher.id)
 
-    while True:
-        changed = False
-        try:
-            text = await fetcher.fetch()
-            h = hashlib.sha256(text.encode()).hexdigest()
+    try:
+        while True:
+            changed = False
+            try:
+                log.debug("[watch:%s] fetching", watcher.id)
+                text = await fetcher.fetch()
+                h = hashlib.sha256(text.encode()).hexdigest()
 
-            if last_hash is not None and h != last_hash:
-                changed = True
-                log.info("Change detected in watcher %s", watcher.id)
-                await notify_change(settings, watcher, last_text or "", text)
+                if last_hash is not None and h != last_hash:
+                    changed = True
+                    log.info("[watch:%s] change detected", watcher.id)
+                    await notify_change(settings, watcher, last_text or "", text)
 
-            await _save_snapshot(watcher.id, h, text)
-            last_hash = h
-            last_text = text
-            await _record_run(watcher.id, "changed" if changed else "ok")
+                await _save_snapshot(watcher.id, h, text)
+                last_hash = h
+                last_text = text
+                await _record_run(watcher.id, "changed" if changed else "ok")
 
-        except ElementNotFoundError as exc:
-            log.warning("Selector not found for watcher %s: %s", watcher.id, exc)
-            await _record_run(watcher.id, "error", str(exc))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Error polling watcher %s", watcher.id)
-            await _record_run(watcher.id, "error", "Unexpected error — see logs")
+            except ElementNotFoundError as exc:
+                log.warning("[watch:%s] selector not found: %s", watcher.id, exc)
+                await _record_run(watcher.id, "error", str(exc))
+            except asyncio.CancelledError:
+                log.info("[watch:%s] cancelled inside poll loop", watcher.id)
+                raise
+            except Exception:
+                log.exception("[watch:%s] unexpected error during poll", watcher.id)
+                await _record_run(watcher.id, "error", "Unexpected error — see logs")
 
-        await asyncio.sleep(watcher.interval)
+            log.debug("[watch:%s] sleeping %ds", watcher.id, watcher.interval)
+            await asyncio.sleep(watcher.interval)
+    except asyncio.CancelledError:
+        log.info("[watch:%s] task cancelled — entering finally", watcher.id)
+        raise
+    finally:
+        log.info("[watch:%s] closing browser fetcher...", watcher.id)
+        await fetcher.close()
+        log.info("[watch:%s] browser fetcher closed", watcher.id)
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +163,13 @@ async def run_engine(settings: Settings) -> None:
             await asyncio.sleep(RESCAN_INTERVAL)
 
     except asyncio.CancelledError:
-        log.info("Engine shutting down — cancelling %d task(s)", len(tasks))
-        for task in tasks.values():
+        log.info("[engine] cancelled — shutting down %d watch task(s)", len(tasks))
+        for wid, task in tasks.items():
+            log.info("[engine] cancelling watch task: %s", wid)
             task.cancel()
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        log.info("[engine] waiting for all watch tasks to finish...")
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        for wid, result in zip(tasks.keys(), results):
+            log.info("[engine] watch task %s finished: %r", wid, result)
+        log.info("[engine] all watch tasks done — re-raising CancelledError")
         raise

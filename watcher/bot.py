@@ -7,6 +7,7 @@ All other senders receive no response (silent drop).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher, F
@@ -63,12 +64,20 @@ async def run_bot(settings: Settings) -> None:
     dp = _build_dispatcher(settings.telegram.chat_id)
 
     log.info(
-        "Telegram bot starting (chat_id=%d, poll_timeout=%ds)",
+        "[bot] starting (chat_id=%d, poll_timeout=%ds)",
         settings.telegram.chat_id,
         settings.telegram.poll_timeout,
     )
     try:
         await dp.start_polling(bot, polling_timeout=settings.telegram.poll_timeout)
+        log.info("[bot] start_polling returned normally")
+    except asyncio.CancelledError:
+        log.info("[bot] start_polling cancelled — closing session")
+        raise
+    except Exception:
+        log.exception("[bot] start_polling raised unexpected exception")
+        raise
     finally:
+        log.info("[bot] closing bot session...")
         await bot.session.close()
-        log.info("Telegram bot stopped")
+        log.info("[bot] session closed")

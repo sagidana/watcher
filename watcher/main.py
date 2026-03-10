@@ -29,17 +29,35 @@ async def run() -> None:
     log.info("Watcher starting...")
     settings = load_settings()
 
+    log.info("[startup] creating bot task")
     bot_task = asyncio.create_task(run_bot(settings), name="telegram-bot")
+    log.info("[startup] creating engine task")
     engine_task = asyncio.create_task(run_engine(settings), name="engine")
 
     try:
-        await asyncio.gather(bot_task, engine_task)
+        # Wait for whichever task finishes first (aiogram catches SIGTERM itself
+        # and stops polling, so bot_task may return normally rather than raise).
+        done, pending = await asyncio.wait(
+            {bot_task, engine_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        log.info("[shutdown] first task(s) done: %s — cancelling remaining: %s",
+                 [t.get_name() for t in done], [t.get_name() for t in pending])
+        for task in pending:
+            task.cancel()
     except asyncio.CancelledError:
+        log.info("[shutdown] main task cancelled externally — cancelling bot + engine")
         bot_task.cancel()
         engine_task.cancel()
-        await asyncio.gather(bot_task, engine_task, return_exceptions=True)
 
-    log.info("Watcher stopped.")
+    log.info("[shutdown] waiting for bot task...")
+    await asyncio.gather(bot_task, return_exceptions=True)
+    log.info("[shutdown] bot task done")
+    log.info("[shutdown] waiting for engine task...")
+    await asyncio.gather(engine_task, return_exceptions=True)
+    log.info("[shutdown] engine task done")
+
+    log.info("[shutdown] run() complete — event loop will close")
 
 
 if __name__ == "__main__":

@@ -92,15 +92,23 @@ class BrowserFetcher:
     async def close(self) -> None:
         try:
             if self._page:
+                log.info("[browser] closing page...")
                 await self._page.close()
+                log.info("[browser] page closed")
             if self._context:
+                log.info("[browser] closing context...")
                 await self._context.close()
+                log.info("[browser] context closed")
             if self._browser:
+                log.info("[browser] closing browser...")
                 await self._browser.close()
+                log.info("[browser] browser closed")
             if self._playwright:
+                log.info("[browser] stopping playwright...")
                 await self._playwright.stop()
+                log.info("[browser] playwright stopped")
         except Exception:
-            log.exception("Error closing BrowserFetcher")
+            log.exception("[browser] error during close")
         finally:
             self._page = self._context = self._browser = self._playwright = None
 
