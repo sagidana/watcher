@@ -21,6 +21,7 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("watcher")
+logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
 
 async def run() -> None:
