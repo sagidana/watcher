@@ -100,8 +100,8 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        log.debug("[watch:%s] cai prompt: %s", watcher_id, prompt)
-        log.debug("[watch:%s] cai diff:\n%s", watcher_id, diff)
+        log.info("[watch:%s] cai prompt: %s", watcher_id, prompt)
+        log.info("[watch:%s] cai diff:\n%s", watcher_id, diff)
 
         stdout, stderr = await proc.communicate()
 
