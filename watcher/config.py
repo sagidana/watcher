@@ -26,6 +26,7 @@ class TelegramSettings:
 @dataclass
 class Settings:
     telegram: TelegramSettings
+    log_level: str = "INFO"
 
 
 def load_settings() -> Settings:
@@ -41,6 +42,7 @@ def load_settings() -> Settings:
         )
 
     poll_timeout = 30
+    log_level = "INFO"
     settings_file = CONFIG_DIR / "settings.yaml"
     if settings_file.exists():
         raw = yaml.safe_load(settings_file.read_text()) or {}
@@ -48,11 +50,13 @@ def load_settings() -> Settings:
             raw.get("telegram", {}).get("poll_timeout", poll_timeout)
         )
         poll_timeout = max(1, min(55, poll_timeout))  # Telegram hard limits
+        log_level = str(raw.get("log_level", log_level)).upper()
 
     return Settings(
         telegram=TelegramSettings(
             token=token,
             chat_id=int(chat_id_raw),
             poll_timeout=poll_timeout,
-        )
+        ),
+        log_level=log_level,
     )

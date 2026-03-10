@@ -10,9 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
+
+# Resolve cai from the same bin/ dir as this Python interpreter so the
+# subprocess works even when systemd doesn't have pyenv shims on PATH.
+_CAI_BIN = str(Path(sys.executable).parent / "cai")
 
 import aiosqlite
 
@@ -67,6 +74,65 @@ async def _record_run(watcher_id: str, status: str, detail: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
+# cai filter
+# ---------------------------------------------------------------------------
+
+async def _cai_filter(watcher_id: str, prompt: str, diff: str) -> bool:
+    """
+    Run the diff through `cai` with the watcher's prompt.
+    Returns True if cai says the change is relevant, False otherwise.
+    """
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, prefix="watcher_diff_"
+        ) as f:
+            tmp_path = f.name
+            f.write(diff)
+
+        proc = await asyncio.create_subprocess_exec(
+            _CAI_BIN,
+            "--file", tmp_path,
+            "--system-prompt", 'response ONLY in the following json format: { "result": true/false }',
+            "--strict-format", "json",
+            "--",
+            prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        log.debug("[watch:%s] cai prompt: %s", watcher_id, prompt)
+        log.debug("[watch:%s] cai diff:\n%s", watcher_id, diff)
+
+        stdout, stderr = await proc.communicate()
+
+        log.debug("[watch:%s] cai stdout: %s", watcher_id, stdout.decode().strip())
+        if stderr:
+            log.debug("[watch:%s] cai stderr: %s", watcher_id, stderr.decode().strip())
+
+        if proc.returncode != 0:
+            log.warning(
+                "[watch:%s] cai exited with code %d: %s",
+                watcher_id, proc.returncode, stderr.decode().strip(),
+            )
+            return True  # fail-open: notify on cai errors
+
+        log.info(f"[watch:%s] cai filter result: {stdout.decode()}")
+        result = json.loads(stdout.decode())
+        log.info("[watch:%s] cai filter result: %s", watcher_id, result)
+        return bool(result.get("result", False))
+
+    except Exception:
+        log.exception("[watch:%s] cai filter failed — notifying anyway", watcher_id)
+        return True  # fail-open
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Per-watcher task
 # ---------------------------------------------------------------------------
 
@@ -96,7 +162,14 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
                 if last_hash is not None and h != last_hash:
                     changed = True
                     log.info("[watch:%s] change detected", watcher.id)
-                    await notify_change(settings, watcher, last_text or "", text)
+                    should_notify = True
+                    if watcher.prompt:
+                        diff = f"OLD:\n{last_text or ''}\n\nNEW:\n{text}"
+                        should_notify = await _cai_filter(watcher.id, watcher.prompt, diff)
+                        if not should_notify:
+                            log.info("[watch:%s] cai filter suppressed notification", watcher.id)
+                    if should_notify:
+                        await notify_change(settings, watcher, last_text or "", text)
 
                 await _save_snapshot(watcher.id, h, text)
                 last_hash = h

@@ -25,6 +25,7 @@ class WatcherConfig:
     interval: int = 30
     enabled: bool = True
     created_at: str = ""     # ISO-8601, filled by caller
+    prompt: str = ""         # optional cai filter prompt
 
 
 def _path(watcher_id: str) -> Path:
@@ -49,6 +50,7 @@ def load_all() -> list[WatcherConfig]:
                     interval=int(data.get("interval", 30)),
                     enabled=bool(data.get("enabled", True)),
                     created_at=str(data.get("created_at", "")),
+                    prompt=str(data.get("prompt", "")),
                 )
             )
         except Exception:
@@ -67,6 +69,7 @@ def save(w: WatcherConfig) -> None:
         "interval": w.interval,
         "enabled": w.enabled,
         "created_at": w.created_at,
+        "prompt": w.prompt,
     }
     _path(w.id).write_text(yaml.dump(data, allow_unicode=True, default_flow_style=False))
 
@@ -96,4 +99,5 @@ def get(watcher_id: str) -> Optional[WatcherConfig]:
         interval=int(data.get("interval", 30)),
         enabled=bool(data.get("enabled", True)),
         created_at=str(data.get("created_at", "")),
+        prompt=str(data.get("prompt", "")),
     )

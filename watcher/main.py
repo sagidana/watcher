@@ -13,21 +13,23 @@ from .engine import run_engine
 
 LOG_FILE = Path("/tmp/watcher.log")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(),
-    ],
-)
 log = logging.getLogger("watcher")
-logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
 
 async def run() -> None:
-    log.info("Watcher starting...")
     settings = load_settings()
+
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(),
+        ],
+    )
+    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+
+    log.info("Watcher starting (log_level=%s)...", settings.log_level)
 
     log.info("[startup] creating bot task")
     bot_task = asyncio.create_task(run_bot(settings), name="telegram-bot")
