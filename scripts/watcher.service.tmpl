@@ -1,0 +1,22 @@
+[Unit]
+Description=Watcher — personal web monitoring service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={working_dir}
+ExecStart={python_bin} -m watcher.main
+Restart=on-failure
+RestartSec=10
+EnvironmentFile={working_dir}/.env
+
+# Limit runaway resource use
+MemoryMax=512M
+
+# Logs go to journald; view with: journalctl --user -u watcher -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

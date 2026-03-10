@@ -1,0 +1,16 @@
+# Watcher definitions
+# Each entry describes one thing to monitor.
+# See README.md for full field reference.
+
+watchers: []
+
+# Example (uncomment and edit to use):
+#
+#  - id: hn-frontpage
+#    name: "Hacker News front page"
+#    url: https://news.ycombinator.com/
+#    fetcher: rss
+#    rss_url: https://news.ycombinator.com/rss
+#    interval_minutes: 15
+#    notify_on: new_items
+#    keywords: []
