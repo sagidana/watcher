@@ -10,13 +10,18 @@ Usage:
 """
 
 import argparse
+import importlib.resources
 import logging
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+import requests
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
 
@@ -86,6 +91,168 @@ def _check_env() -> bool:
     return True
 
 
+def _is_env_configured() -> bool:
+    """Return True if .env exists with valid TELEGRAM_TOKEN and TELEGRAM_CHAT_ID."""
+    env_file = CONFIG_DIR / ".env"
+    if not env_file.exists():
+        return False
+    content = env_file.read_text()
+    for key in ("TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"):
+        found = any(
+            line.strip().startswith(f"{key}=")
+            and (v := line.strip().split("=", 1)[1].strip())
+            and "your-" not in v
+            for line in content.splitlines()
+        )
+        if not found:
+            return False
+    return True
+
+
+def _setup_telegram() -> None:
+    """Interactive wizard to configure Telegram credentials in ~/.config/watcher/.env.
+
+    No-op if .env already has valid values.
+    """
+    if _is_env_configured():
+        console.print("[green]✓[/green] Telegram already configured, skipping setup")
+        return
+
+    console.print(
+        Panel(
+            "[bold]Telegram setup[/bold]\n\n"
+            "Open Telegram → message [cyan]@BotFather[/cyan] → [bold]/newbot[/bold] "
+            "→ follow prompts → paste the token below.",
+            style="blue",
+        )
+    )
+
+    # --- Stage 1: token entry (up to 3 tries) ---
+    token: str | None = None
+    bot_username: str | None = None
+    for attempt in range(1, 4):
+        raw = Prompt.ask("Telegram bot token", password=True)
+        raw = raw.strip()
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{raw}/getMe", timeout=10
+            )
+            data = resp.json()
+        except requests.RequestException as exc:
+            console.print(f"[red]✗[/red] Network error: {exc}")
+            if attempt < 3:
+                console.print("  Try again…")
+            continue
+
+        if not data.get("ok"):
+            desc = data.get("description", "unknown error")
+            console.print(f"[red]✗[/red] Telegram rejected the token: {desc}")
+            if attempt < 3:
+                console.print("  Try again…")
+            continue
+
+        token = raw
+        bot_username = data["result"]["username"]
+        console.print(f"[green]✓[/green] Connected as [bold]@{bot_username}[/bold]")
+        break
+
+    if token is None:
+        console.print("[red]✗[/red] Could not validate token after 3 attempts. Aborting install.")
+        sys.exit(1)
+
+    # --- Stage 2: chat ID discovery (poll getUpdates for up to 60 s) ---
+    console.print(
+        "\nNow send [bold]any message[/bold] to your bot in Telegram (you have 60 s)…"
+    )
+
+    chat_id: str | None = None
+    deadline = time.monotonic() + 60
+    offset = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+        console=console,
+    ) as progress:
+        task = progress.add_task("Waiting for message…", total=None)
+        while time.monotonic() < deadline:
+            remaining = int(deadline - time.monotonic())
+            progress.update(task, description=f"Waiting for message… ({remaining}s left)")
+            poll_timeout = min(20, max(1, remaining))
+            try:
+                resp = requests.get(
+                    f"https://api.telegram.org/bot{token}/getUpdates",
+                    params={"timeout": poll_timeout, "offset": offset},
+                    timeout=poll_timeout + 5,
+                )
+                updates = resp.json().get("result", [])
+            except requests.RequestException:
+                time.sleep(2)
+                continue
+
+            for update in updates:
+                offset = update["update_id"] + 1
+                msg = update.get("message") or update.get("channel_post")
+                if msg and "chat" in msg:
+                    chat_id = str(msg["chat"]["id"])
+                    break
+
+            if chat_id is not None:
+                break
+
+            if not updates:
+                time.sleep(2)
+
+    if chat_id is None:
+        console.print(
+            "[red]✗[/red] No message received within 60 s.\n"
+            "  To find your chat ID manually, send a message to your bot then visit:\n"
+            f"  [cyan]https://api.telegram.org/bot{token}/getUpdates[/cyan]\n"
+            "  and look for [bold]message.chat.id[/bold] in the JSON."
+        )
+        sys.exit(1)
+
+    console.print(f"[green]✓[/green] Chat ID found: [bold]{chat_id}[/bold]")
+
+    # --- Stage 3: test message ---
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": "✅ Watcher is connected!"},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        console.print(f"[yellow]~[/yellow] Could not send test message: {exc}")
+
+    confirmed = Confirm.ask("Did you receive the test message?", default=True)
+    if not confirmed:
+        console.print(
+            "[red]✗[/red] Test message not received.\n"
+            "  Troubleshooting tips:\n"
+            "  • Make sure you sent a message [bold]to[/bold] the bot (not from it)\n"
+            "  • Check the bot is not blocked\n"
+            "  • Try again with [cyan]watcher install[/cyan] after resolving the issue"
+        )
+        sys.exit(1)
+
+    # --- Stage 4: write .env ---
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    env_file = CONFIG_DIR / ".env"
+    env_file.write_text(f"TELEGRAM_TOKEN={token}\nTELEGRAM_CHAT_ID={chat_id}\n")
+    env_file.chmod(0o600)
+
+    console.print(
+        Panel(
+            f"[green][bold].env written[/bold][/green]\n\n"
+            f"  [cyan]{env_file}[/cyan]\n\n"
+            f"  TELEGRAM_TOKEN   = (hidden)\n"
+            f"  TELEGRAM_CHAT_ID = {chat_id}",
+            style="green",
+        )
+    )
+
+
 def _ensure_config_dir() -> None:
     """Create ~/.config/watcher and seed watchers.yaml if missing."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -106,11 +273,10 @@ def _ensure_config_dir() -> None:
 
 def _write_unit_file() -> None:
     """Generate and write the systemd unit file from the template."""
-    template_path = _working_dir() / "scripts" / "watcher.service.tmpl"
-    template = template_path.read_text()
+    ref = importlib.resources.files("watcher.data").joinpath("watcher.service.tmpl")
+    template = ref.read_text(encoding="utf-8")
 
     unit_content = template.format(
-        working_dir=str(_working_dir()),
         python_bin=_python_bin(),
         config_dir=str(CONFIG_DIR),
         log_file=str(LOG_FILE),
@@ -135,11 +301,14 @@ def cmd_install(_args: argparse.Namespace) -> None:
     # 1. Create config dir
     _ensure_config_dir()
 
-    # 2. Validate environment
+    # 2. Telegram setup (interactive wizard if .env missing/incomplete)
+    _setup_telegram()
+
+    # 3. Final env guard
     if not _check_env():
         sys.exit(1)
 
-    # 3. Install Playwright browser
+    # 4. Install Playwright browser
     console.print("\n[bold]Installing Playwright Chromium...[/bold]")
     result = subprocess.run(
         [_python_bin(), "-m", "playwright", "install", "chromium"],
@@ -150,16 +319,16 @@ def cmd_install(_args: argparse.Namespace) -> None:
         sys.exit(1)
     console.print("[green]✓[/green] Playwright Chromium installed")
 
-    # 4. Initialise database
+    # 5. Initialise database
     console.print("\n[bold]Initialising database...[/bold]")
     _init_db()
     console.print("[green]✓[/green] Database initialised")
 
-    # 5. Write systemd unit
+    # 6. Write systemd unit
     console.print("\n[bold]Registering systemd service...[/bold]")
     _write_unit_file()
 
-    # 6. Enable and start
+    # 7. Enable and start
     _run_systemctl("daemon-reload")
     result = _run_systemctl("enable", "--now", UNIT_NAME)
     if result.returncode != 0:
