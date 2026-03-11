@@ -424,8 +424,8 @@ def cmd_watch(_args: argparse.Namespace) -> None:
 
     console.print(
         "[bold]Opening browser…[/bold]\n"
-        "Navigate to the page you want to watch, then click [cyan]Pick Element[/cyan] "
-        "in the toolbar and click on the element you want to monitor."
+        "Navigate to the page you want to watch, then click [cyan]Confirm[/cyan] "
+        "in the toolbar."
     )
 
     try:
@@ -435,10 +435,11 @@ def cmd_watch(_args: argparse.Namespace) -> None:
         console.print(f"[red]✗[/red] {exc}")
         sys.exit(1)
 
-    console.print(
-        f"\n[green]✓[/green] Selected: [cyan]{result.selector}[/cyan]\n"
-        f"   Page: {result.url}"
-    )
+    if result is None:
+        console.print("[yellow]~[/yellow] Browser closed without confirming — no watcher added.")
+        return
+
+    console.print(f"\n[green]✓[/green] Confirmed page: {result.url}")
 
     from watcher.watchers_config import WatcherConfig, save
 
@@ -448,7 +449,6 @@ def cmd_watch(_args: argparse.Namespace) -> None:
         id=watcher_id,
         name=name,
         url=result.url,
-        selector=result.selector,
         interval=30,
         enabled=True,
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -456,7 +456,7 @@ def cmd_watch(_args: argparse.Namespace) -> None:
     save(w)
 
     console.print(
-        f"[green]✓[/green] Watcher saved: [bold]{w.name}[/bold] → [cyan]{w.selector}[/cyan]\n"
+        f"[green]✓[/green] Watcher saved: [bold]{w.name}[/bold]\n"
         f"   File: [dim]{CONFIG_DIR / 'watchers' / (watcher_id + '.yaml')}[/dim]\n"
         "The background service will pick it up within 30 seconds."
     )

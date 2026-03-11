@@ -13,14 +13,10 @@ import re
 log = logging.getLogger("watcher.fetcher.browser")
 
 
-class ElementNotFoundError(Exception):
-    """Raised when the CSS selector matches nothing on the page."""
-
-
 class BrowserFetcher:
     """
     One instance per watcher.  Call:
-        await fetcher.start(url, selector)
+        await fetcher.start(url)
         text = await fetcher.fetch()   # call repeatedly
         await fetcher.close()
     """
@@ -31,17 +27,14 @@ class BrowserFetcher:
         self._context = None
         self._page = None
         self._url: str = ""
-        self._selector: str = ""
 
-    async def start(self, url: str, selector: str) -> None:
+    async def start(self, url: str) -> None:
         from playwright.async_api import async_playwright
 
         self._url = url
-        self._selector = selector
 
         self._playwright = await async_playwright().start()
 
-        # Try stealth; fall back gracefully
         self._browser = await self._playwright.chromium.launch(headless=True)
         self._context = await self._browser.new_context(
             user_agent=(
@@ -72,7 +65,7 @@ class BrowserFetcher:
                 raise
 
     async def fetch(self) -> str:
-        """Reload the page and return inner_text() of the selector (normalised)."""
+        """Reload the page and return visible text content (normalised)."""
         assert self._page is not None
 
         try:
@@ -80,14 +73,23 @@ class BrowserFetcher:
         except Exception:
             await self._page.reload(wait_until="domcontentloaded", timeout=20_000)
 
-        el = await self._page.query_selector(self._selector)
-        if el is None:
-            raise ElementNotFoundError(
-                f"Selector {self._selector!r} not found on {self._url}"
-            )
+        lines: list[str] = []
+        elements = self._page.locator("body *")
+        count = await elements.count()
+        for i in range(count):
+            el = elements.nth(i)
+            if await el.is_visible():
+                text = await el.inner_text()
+                if text.strip():
+                    lines.append(text.strip())
 
-        raw = await el.inner_text()
-        return _normalise(raw)
+        content = "\n".join(lines)
+        log.debug(
+            "[browser] extracted %d chars from %d visible elements on %s",
+            len(content), count, self._url,
+        )
+
+        return _normalise(content)
 
     async def close(self) -> None:
         try:

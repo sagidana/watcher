@@ -24,7 +24,7 @@ _CAI_BIN = str(Path(sys.executable).parent / "cai")
 import aiosqlite
 
 from .config import Settings
-from .fetchers.browser import BrowserFetcher, ElementNotFoundError
+from .fetchers.browser import BrowserFetcher
 from .notifier import build_short_diff, notify_change
 from .watchers_config import WatcherConfig, load_all
 
@@ -142,7 +142,7 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
 
     try:
         log.info("[watch:%s] launching browser fetcher", watcher.id)
-        await fetcher.start(watcher.url, watcher.selector)
+        await fetcher.start(watcher.url)
         log.info("[watch:%s] browser fetcher ready", watcher.id)
     except Exception:
         log.exception("[watch:%s] failed to start fetcher", watcher.id)
@@ -176,9 +176,6 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
                 last_text = text
                 await _record_run(watcher.id, "changed" if changed else "ok")
 
-            except ElementNotFoundError as exc:
-                log.warning("[watch:%s] selector not found: %s", watcher.id, exc)
-                await _record_run(watcher.id, "error", str(exc))
             except asyncio.CancelledError:
                 log.info("[watch:%s] cancelled inside poll loop", watcher.id)
                 raise

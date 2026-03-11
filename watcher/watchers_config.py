@@ -21,7 +21,6 @@ class WatcherConfig:
     id: str                  # 8-char hex (secrets.token_hex(4))
     name: str
     url: str
-    selector: str
     interval: int = 30
     enabled: bool = True
     created_at: str = ""     # ISO-8601, filled by caller
@@ -46,7 +45,6 @@ def load_all() -> list[WatcherConfig]:
                     id=str(data["id"]),
                     name=str(data.get("name", data["id"])),
                     url=str(data["url"]),
-                    selector=str(data["selector"]),
                     interval=int(data.get("interval", 30)),
                     enabled=bool(data.get("enabled", True)),
                     created_at=str(data.get("created_at", "")),
@@ -65,7 +63,6 @@ def save(w: WatcherConfig) -> None:
         "id": w.id,
         "name": w.name,
         "url": w.url,
-        "selector": w.selector,
         "interval": w.interval,
         "enabled": w.enabled,
         "created_at": w.created_at,
@@ -95,7 +92,6 @@ def get(watcher_id: str) -> Optional[WatcherConfig]:
         id=str(data["id"]),
         name=str(data.get("name", data["id"])),
         url=str(data["url"]),
-        selector=str(data["selector"]),
         interval=int(data.get("interval", 30)),
         enabled=bool(data.get("enabled", True)),
         created_at=str(data.get("created_at", "")),
