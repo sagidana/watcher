@@ -7,7 +7,7 @@ Each watcher lives in its own file:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -23,8 +23,19 @@ class WatcherConfig:
     url: str
     interval: int = 30
     enabled: bool = True
-    created_at: str = ""     # ISO-8601, filled by caller
-    prompt: str = ""         # optional cai filter prompt
+    created_at: str = ""              # ISO-8601, filled by caller
+    prompts: list[str] = field(default_factory=list)  # ordered cai filter prompts (chain)
+
+
+def _load_prompts(data: dict) -> list[str]:
+    """Read prompts from YAML data; supports both 'prompts' list and legacy 'prompt' string."""
+    if "prompts" in data:
+        raw = data["prompts"]
+        if isinstance(raw, list):
+            return [str(p) for p in raw if p]
+    if "prompt" in data and data["prompt"]:
+        return [str(data["prompt"])]
+    return []
 
 
 def _path(watcher_id: str) -> Path:
@@ -48,7 +59,7 @@ def load_all() -> list[WatcherConfig]:
                     interval=int(data.get("interval", 30)),
                     enabled=bool(data.get("enabled", True)),
                     created_at=str(data.get("created_at", "")),
-                    prompt=str(data.get("prompt", "")),
+                    prompts=_load_prompts(data),
                 )
             )
         except Exception:
@@ -66,7 +77,7 @@ def save(w: WatcherConfig) -> None:
         "interval": w.interval,
         "enabled": w.enabled,
         "created_at": w.created_at,
-        "prompt": w.prompt,
+        "prompts": w.prompts,
     }
     _path(w.id).write_text(yaml.dump(data, allow_unicode=True, default_flow_style=False))
 
@@ -95,5 +106,5 @@ def get(watcher_id: str) -> Optional[WatcherConfig]:
         interval=int(data.get("interval", 30)),
         enabled=bool(data.get("enabled", True)),
         created_at=str(data.get("created_at", "")),
-        prompt=str(data.get("prompt", "")),
+        prompts=_load_prompts(data),
     )

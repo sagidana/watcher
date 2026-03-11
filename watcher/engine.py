@@ -92,7 +92,7 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
         proc = await asyncio.create_subprocess_exec(
             _CAI_BIN,
             "--file", tmp_path,
-            "--system-prompt", 'in the case you have nothing you want to pass through, always return empty line',
+            # "--system-prompt", 'in the case you have nothing you want to pass through, always return ine',
             "--",
             prompt,
             stdout=asyncio.subprocess.PIPE,
@@ -166,11 +166,15 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
                     changed = True
                     log.info("[watch:%s] change detected", watcher.id)
                     diff = build_short_diff(last_text or "", text)
-                    if watcher.prompt:
-                        notification_text = await _cai_filter(watcher.id, watcher.prompt, diff)
-                        if not notification_text:
-                            log.info("[watch:%s] cai filter suppressed notification (empty result)", watcher.id)
-                            notification_text = None
+                    if watcher.prompts:
+                        content: Optional[str] = diff
+                        for i, prompt in enumerate(watcher.prompts):
+                            log.info("[watch:%s] running prompt %d/%d", watcher.id, i + 1, len(watcher.prompts))
+                            content = await _cai_filter(watcher.id, prompt, content)
+                            if not content:
+                                log.info("[watch:%s] prompt %d/%d produced empty result — stopping chain", watcher.id, i + 1, len(watcher.prompts))
+                                break
+                        notification_text = content or None
                     else:
                         notification_text = diff
                     if notification_text is not None:
