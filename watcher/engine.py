@@ -107,7 +107,7 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
             proc.kill()
             await proc.communicate()
             log.warning("[watch:%s] cai timed out after 30s", watcher_id)
-            return f"(cai filter unavailable — content changed)\n{diff}"
+            return None
 
         log.debug("[watch:%s] cai stdout: %s", watcher_id, stdout.decode().strip())
         if stderr:
@@ -118,7 +118,7 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
                 "[watch:%s] cai exited with code %d: %s",
                 watcher_id, proc.returncode, stderr.decode().strip(),
             )
-            return f"(cai filter unavailable — content changed)\n{diff}"
+            return None
 
         result = stdout.decode().strip()
         log.info("[watch:%s] cai filter result: %s", watcher_id, result)
@@ -138,6 +138,17 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
 # ---------------------------------------------------------------------------
 # Per-watcher task
 # ---------------------------------------------------------------------------
+
+def is_content_empty(content) -> bool:
+    if content is None: return True
+    if len(content): return True
+    content = content.strip()
+
+    if content == "\"\"": return True
+    if content == "none": return True
+    if content == "None": return True
+
+    return False
 
 async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
     log.info("[watch:%s] task started", watcher.id)
@@ -174,10 +185,12 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
                             if not content:
                                 log.info("[watch:%s] prompt %d/%d produced empty result — stopping chain", watcher.id, i + 1, len(watcher.prompts))
                                 break
+
+                            log.info("[watch:%s] prompt %d/%d produced result: %s", watcher.id, i + 1, len(watcher.prompts), content)
                         notification_text = content or None
                     else:
                         notification_text = diff
-                    if notification_text is not None:
+                    if not is_content_empty(notification_text):
                         await notify_change(settings, watcher, notification_text)
 
                 await _save_snapshot(watcher.id, h, text)

@@ -10,8 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
-
+import logging
 import yaml
+
+log = logging.getLogger("watcher.engine")
 
 WATCHERS_DIR = Path("~/.config/watcher/watchers").expanduser()
 
@@ -62,8 +64,9 @@ def load_all() -> list[WatcherConfig]:
                     prompts=_load_prompts(data),
                 )
             )
-        except Exception:
-            pass  # skip malformed files silently
+        except Exception as e:
+            log.warning(f"failed to load config {f}: {e=}")
+
     return watchers
 
 
