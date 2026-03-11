@@ -92,7 +92,7 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
         proc = await asyncio.create_subprocess_exec(
             _CAI_BIN,
             "--file", tmp_path,
-            "--system-prompt", 'in the case you have nothing you want to pass through, always return nothing.',
+            "--system-prompt", 'in the case you have nothing you want to pass through, always return empty line',
             "--",
             prompt,
             stdout=asyncio.subprocess.PIPE,
@@ -102,7 +102,7 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
         log.info("[watch:%s] cai diff:\n%s", watcher_id, diff)
 
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()

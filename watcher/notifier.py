@@ -19,10 +19,22 @@ _MAX_MSG = 4000  # Telegram max message length (4096, leave headroom)
 
 
 def _split_diff_lines(old_text: str, new_text: str) -> tuple[list[str], list[str]]:
-    """Return (added_lines, removed_lines) from a unified diff."""
+    """Return (added_lines, removed_lines) from a unified diff, deduplicated."""
     raw = list(unified_diff(old_text.splitlines(), new_text.splitlines(), lineterm=""))
-    added = [l[1:] for l in raw if l.startswith("+") and not l.startswith("+++")]
-    removed = [l[1:] for l in raw if l.startswith("-") and not l.startswith("---")]
+    seen_added: set[str] = set()
+    seen_removed: set[str] = set()
+    added, removed = [], []
+    for l in raw:
+        if l.startswith("+") and not l.startswith("+++"):
+            line = l[1:]
+            if line not in seen_added:
+                seen_added.add(line)
+                added.append(line)
+        elif l.startswith("-") and not l.startswith("---"):
+            line = l[1:]
+            if line not in seen_removed:
+                seen_removed.add(line)
+                removed.append(line)
     return added, removed
 
 
