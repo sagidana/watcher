@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import sys
 import tempfile
@@ -77,7 +76,7 @@ async def _record_run(watcher_id: str, status: str, detail: str = "") -> None:
 # cai filter
 # ---------------------------------------------------------------------------
 
-async def _cai_filter(watcher_id: str, prompt: str, diff: str) -> bool:
+async def _cai_filter(watcher_id: str, prompt: str, diff: str):
     """
     Run the diff through `cai` with the watcher's prompt.
     Returns True if cai says the change is relevant, False otherwise.
@@ -93,8 +92,7 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str) -> bool:
         proc = await asyncio.create_subprocess_exec(
             _CAI_BIN,
             "--file", tmp_path,
-            "--system-prompt", 'response ONLY in the following json format: { "result": true/false }',
-            "--strict-format", "json",
+            "--system-prompt", 'in the case you have nothing you want to pass through, always return nothing.',
             "--",
             prompt,
             stdout=asyncio.subprocess.PIPE,
@@ -103,7 +101,13 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str) -> bool:
         log.info("[watch:%s] cai prompt: %s", watcher_id, prompt)
         log.info("[watch:%s] cai diff:\n%s", watcher_id, diff)
 
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            log.warning("[watch:%s] cai timed out after 10s", watcher_id)
+            return f"(cai filter unavailable — content changed)\n{diff}"
 
         log.debug("[watch:%s] cai stdout: %s", watcher_id, stdout.decode().strip())
         if stderr:
@@ -114,16 +118,15 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str) -> bool:
                 "[watch:%s] cai exited with code %d: %s",
                 watcher_id, proc.returncode, stderr.decode().strip(),
             )
-            return True  # fail-open: notify on cai errors
+            return f"(cai filter unavailable — content changed)\n{diff}"
 
-        log.info(f"[watch:%s] cai filter result: {stdout.decode()}")
-        result = json.loads(stdout.decode())
+        result = stdout.decode().strip()
         log.info("[watch:%s] cai filter result: %s", watcher_id, result)
-        return bool(result.get("result", False))
+        return result or None
 
     except Exception:
         log.exception("[watch:%s] cai filter failed — notifying anyway", watcher_id)
-        return True  # fail-open
+        return f"(cai filter unavailable — content changed)\n{diff}"
     finally:
         if tmp_path:
             try:
@@ -162,14 +165,16 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
                 if last_hash is not None and h != last_hash:
                     changed = True
                     log.info("[watch:%s] change detected", watcher.id)
-                    should_notify = True
+                    diff = build_short_diff(last_text or "", text)
                     if watcher.prompt:
-                        diff = build_short_diff(last_text or "", text)
-                        should_notify = await _cai_filter(watcher.id, watcher.prompt, diff)
-                        if not should_notify:
-                            log.info("[watch:%s] cai filter suppressed notification", watcher.id)
-                    if should_notify:
-                        await notify_change(settings, watcher, last_text or "", text)
+                        notification_text = await _cai_filter(watcher.id, watcher.prompt, diff)
+                        if not notification_text:
+                            log.info("[watch:%s] cai filter suppressed notification (empty result)", watcher.id)
+                            notification_text = None
+                    else:
+                        notification_text = diff
+                    if notification_text is not None:
+                        await notify_change(settings, watcher, notification_text)
 
                 await _save_snapshot(watcher.id, h, text)
                 last_hash = h

@@ -40,23 +40,10 @@ def build_short_diff(old_text: str, new_text: str, max_lines: int = _MAX_LINES) 
 async def notify_change(
     settings: Settings,
     watcher: WatcherConfig,
-    old_text: str,
-    new_text: str,
+    text: str,
 ) -> None:
-    """Compute a diff and send it to the configured Telegram chat."""
-    added_lines, removed_lines = _split_diff_lines(old_text, new_text)
-
-    msg = f"*{_escape(watcher.name)}* changed\n{_escape(watcher.url)}\n\n"
-
-    if added_lines:
-        msg += "Added:\n" + "\n".join(f"`+ {_escape(l)}`" for l in added_lines[:_MAX_LINES])
-    if removed_lines:
-        if added_lines:
-            msg += "\n"
-        msg += "Removed:\n" + "\n".join(f"`- {_escape(l)}`" for l in removed_lines[:_MAX_LINES])
-
-    if not added_lines and not removed_lines:
-        msg += "_\\(content changed but diff is empty\\)_"
+    """Send a Telegram notification for a watcher change."""
+    msg = f"{watcher.name}\n{watcher.url}\n\n{text}"
 
     if len(msg) > _MAX_MSG:
         msg = msg[:_MAX_MSG] + "\n…"
@@ -66,7 +53,6 @@ async def notify_change(
         await bot.send_message(
             chat_id=settings.telegram.chat_id,
             text=msg,
-            parse_mode="MarkdownV2",
         )
         log.info("Notification sent for watcher %s", watcher.id)
     except Exception:
@@ -75,7 +61,3 @@ async def notify_change(
         await bot.session.close()
 
 
-def _escape(text: str) -> str:
-    """Escape special MarkdownV2 characters."""
-    special = r"\_*[]()~`>#+-=|{}.!"
-    return "".join(f"\\{c}" if c in special else c for c in text)
