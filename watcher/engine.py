@@ -102,11 +102,11 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
         log.info("[watch:%s] cai diff:\n%s", watcher_id, diff)
 
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
-            log.warning("[watch:%s] cai timed out after 10s", watcher_id)
+            log.warning("[watch:%s] cai timed out after 30s", watcher_id)
             return f"(cai filter unavailable — content changed)\n{diff}"
 
         log.debug("[watch:%s] cai stdout: %s", watcher_id, stdout.decode().strip())
