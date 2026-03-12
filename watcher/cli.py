@@ -519,9 +519,10 @@ def cmd_message(args: argparse.Namespace) -> None:
 
     if text:
         try:
+            import html as _html
             resp = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
+                json={"chat_id": chat_id, "text": f"<code>{_html.escape(text)}</code>", "parse_mode": "HTML"},
                 timeout=15,
             )
             data = resp.json()
