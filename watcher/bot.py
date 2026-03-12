@@ -97,7 +97,7 @@ def _prompts_text(w: wc.WatcherConfig) -> str:
         return f"📝 <b>{name}</b> — no prompts defined."
     lines = [f"📝 Prompts for <b>{name}</b>:"]
     for i, p in enumerate(w.prompts):
-        lines.append(f"\n{i + 1}. {_html.escape(p[:200])}")
+        lines.append(f"\n{i + 1}. {_html.escape(p)}")
     return "\n".join(lines)
 
 
