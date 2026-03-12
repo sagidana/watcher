@@ -141,12 +141,12 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
 
 def is_content_empty(content) -> bool:
     if content is None: return True
-    if len(content): return True
+    if len(content) == 0: return True
     content = content.strip()
 
     if content == "\"\"": return True
-    if content == "none": return True
-    if content == "None": return True
+    if content.lower() == "none": return True
+    if content.lower() == "false": return True
 
     return False
 
