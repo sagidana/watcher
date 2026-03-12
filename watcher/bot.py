@@ -26,6 +26,35 @@ from aiogram.types import (
 from .config import Settings
 from . import watchers_config as wc
 
+# ── clipboard helpers ────────────────────────────────────────────────────────
+
+_CLIPBOARD_BACKENDS = [
+    ("windows",   ["/mnt/c/Windows/System32/clip.exe"]),
+    ("xclip",     ["xclip", "-selection", "clipboard"]),
+    ("xsel",      ["xsel", "--clipboard", "--input"]),
+]
+
+
+async def _set_clipboard(text: str) -> list[str]:
+    """Write *text* to every available clipboard backend. Returns names that succeeded."""
+    ok: list[str] = []
+    for name, cmd in _CLIPBOARD_BACKENDS:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate(text.encode())
+            if proc.returncode == 0:
+                ok.append(name)
+        except (FileNotFoundError, OSError):
+            pass
+        except Exception:
+            log.exception("clipboard backend %r failed", name)
+    return ok
+
 log = logging.getLogger("watcher.bot")
 
 
@@ -169,7 +198,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         log.info("cmd=start chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
         _pending.pop(message.chat.id, None)
         await message.answer(
-            "Watcher is running.\n\nCommands:\n/status — service status\n/watchers — manage watchers\n/help — help",
+            "Watcher is running.\n\nCommands:\n/status — service status\n/watchers — manage watchers\n/clipboard — set clipboard\n/help — help",
             reply_markup=ReplyKeyboardRemove(),
         )
 
@@ -182,11 +211,28 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
     async def cmd_help(message: Message) -> None:
         log.info("cmd=help chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
         await message.answer(
-            "/start    — greeting\n"
-            "/status   — service status\n"
-            "/watchers — manage watchers\n"
-            "/help     — this message"
+            "/start     — greeting\n"
+            "/status    — service status\n"
+            "/watchers  — manage watchers\n"
+            "/clipboard — set clipboard\n"
+            "/help      — this message"
         )
+
+    @dp.message(Command("clipboard"))
+    async def cmd_clipboard(message: Message) -> None:
+        log.info("cmd=clipboard chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
+        _pending.pop(message.chat.id, None)
+        # Text may be passed inline: /clipboard some text here
+        text = (message.text or "").partition(" ")[2].strip()
+        if text:
+            ok = await _set_clipboard(text)
+            if ok:
+                await message.answer(f"✅ Clipboard set via: {', '.join(ok)}")
+            else:
+                await message.answer("❌ No clipboard backend available (clip.exe / xclip / xsel).")
+        else:
+            ask = await message.answer("Send the text to copy to the clipboard:")
+            _pending[message.chat.id] = {"action": "clipboard", "ask_msg_id": ask.message_id}
 
     @dp.message(Command("watchers"))
     async def cmd_watchers(message: Message) -> None:
@@ -489,6 +535,19 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             await _cleanup_input()
             await _render_prompts(bot, message.chat.id, wid)
 
+        # ── waiting for clipboard text ─────────────────────────────────────────
+        elif action == "clipboard":
+            if not text:
+                await message.answer("Please send non-empty text.")
+                return
+            _pending.pop(message.chat.id, None)
+            await _cleanup_input()
+            ok = await _set_clipboard(text)
+            if ok:
+                await bot.send_message(message.chat.id, f"✅ Clipboard set via: {', '.join(ok)}")
+            else:
+                await bot.send_message(message.chat.id, "❌ No clipboard backend available (clip.exe / xclip / xsel).")
+
         # ── waiting for new prompt text to append ──────────────────────────────
         elif action == "create_prompt":
             if not text:
@@ -510,10 +569,11 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
 
 
 _BOT_COMMANDS = [
-    BotCommand(command="watchers", description="Manage watchers"),
-    BotCommand(command="status",   description="Service status"),
-    BotCommand(command="help",     description="Show help"),
-    BotCommand(command="start",    description="Greeting"),
+    BotCommand(command="watchers",  description="Manage watchers"),
+    BotCommand(command="clipboard", description="Set clipboard text"),
+    BotCommand(command="status",    description="Service status"),
+    BotCommand(command="help",      description="Show help"),
+    BotCommand(command="start",     description="Greeting"),
 ]
 
 
