@@ -87,6 +87,30 @@ def _done_btn() -> InlineKeyboardButton:
     return InlineKeyboardButton(text="✖ Done", callback_data="w:done")
 
 
+def _fmt_interval(seconds: int) -> str:
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def _watchers_list_text(watchers: list[wc.WatcherConfig]) -> str:
+    if not watchers:
+        return "📡 <b>Watchers</b>\n\nNo watchers configured."
+    active = sum(1 for w in watchers if w.enabled)
+    paused = len(watchers) - active
+    if paused == 0:
+        subtitle = f"{active} active"
+    elif active == 0:
+        subtitle = f"{paused} paused"
+    else:
+        subtitle = f"{active} active · {paused} paused"
+    return f"📡 <b>Watchers</b>  <i>({subtitle})</i>"
+
+
 def _name_from_url(url: str) -> str:
     """Deduce a short display name from a URL."""
     try:
@@ -103,12 +127,12 @@ def _name_from_url(url: str) -> str:
 def _watchers_list_kb(watchers: list[wc.WatcherConfig]) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(
-            text=f"{'🟢' if w.enabled else '🔴'} {w.name}",
+            text=f"{'🟢' if w.enabled else '🔴'}  {w.name}  ·  {_fmt_interval(w.interval)}",
             callback_data=f"w:actions:{w.id}",
         )]
         for w in watchers
     ]
-    rows.append([InlineKeyboardButton(text="➕ Add watcher", callback_data="w:add_watcher")])
+    rows.append([InlineKeyboardButton(text="➕ Add", callback_data="w:add_watcher")])
     rows.append([_done_btn()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -149,20 +173,12 @@ def _unit_sel_new_kb() -> InlineKeyboardMarkup:
 def _actions_kb(w: wc.WatcherConfig) -> InlineKeyboardMarkup:
     toggle = "🔴 Disable" if w.enabled else "🟢 Enable"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ Modify",   callback_data=f"w:modify:{w.id}")],
         [InlineKeyboardButton(text=toggle,         callback_data=f"w:toggle:{w.id}")],
+        [InlineKeyboardButton(text="✏️ Rename",    callback_data=f"w:rename:{w.id}")],
+        [InlineKeyboardButton(text="⏱  Set Interval",  callback_data=f"w:interval:{w.id}")],
+        [InlineKeyboardButton(text="📝 Prompts",   callback_data=f"w:prompts:{w.id}")],
         [InlineKeyboardButton(text="🗑 Delete",    callback_data=f"w:delete:{w.id}")],
-        [InlineKeyboardButton(text="◀ Watchers",  callback_data="w:list"),
-         _done_btn()],
-    ])
-
-
-def _modify_kb(wid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Rename",   callback_data=f"w:rename:{wid}")],
-        [InlineKeyboardButton(text="⏱ Interval", callback_data=f"w:interval:{wid}")],
-        [InlineKeyboardButton(text="📝 Prompts",  callback_data=f"w:prompts:{wid}")],
-        [InlineKeyboardButton(text="◀ Back",      callback_data=f"w:actions:{wid}"),
+        [InlineKeyboardButton(text="◀ Back",  callback_data="w:list"),
          _done_btn()],
     ])
 
@@ -176,8 +192,8 @@ def _prompt_kb(wid: str, idx: int) -> InlineKeyboardMarkup:
 
 def _add_prompt_kb(wid: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Add prompt", callback_data=f"w:add_prompt:{wid}"),
-         InlineKeyboardButton(text="◀ Back",        callback_data=f"w:modify:{wid}")],
+        [InlineKeyboardButton(text="➕ Add", callback_data=f"w:add_prompt:{wid}"),
+         InlineKeyboardButton(text="◀ Back",        callback_data=f"w:actions:{wid}")],
         [_done_btn()],
     ])
 
@@ -185,7 +201,7 @@ def _add_prompt_kb(wid: str) -> InlineKeyboardMarkup:
 def _input_cancel_kb(wid: str) -> InlineKeyboardMarkup:
     """Keyboard attached to bot 'ask for input' messages so the user can cancel."""
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✖ Done", callback_data=f"w:cancel_input:{wid}"),
+        InlineKeyboardButton(text="✖  Done", callback_data=f"w:cancel_input:{wid}"),
     ]])
 
 
@@ -296,8 +312,11 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         log.info("cmd=watchers chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
         _pending.pop(message.chat.id, None)
         watchers = wc.load_all()
-        text = "Watchers:" if watchers else "No watchers configured."
-        await message.answer(text, reply_markup=_watchers_list_kb(watchers))
+        await message.answer(
+            _watchers_list_text(watchers),
+            reply_markup=_watchers_list_kb(watchers),
+            parse_mode="HTML",
+        )
 
     # ── Done — close session at any stage ──────────────────────────────────────
 
@@ -325,13 +344,13 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         if return_to == "prompts":
             await _render_prompts(bot, chat_id, wid)
         else:
-            # return_to == "modify"
+            # return_to == "actions"
             w = wc.get(wid)
             if w:
                 await bot.send_message(
                     chat_id,
-                    f"⚙️ Modify <b>{_html.escape(w.name)}</b>:",
-                    reply_markup=_modify_kb(wid),
+                    _watcher_info_text(w),
+                    reply_markup=_actions_kb(w),
                     parse_mode="HTML",
                 )
 
@@ -343,20 +362,30 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         _pending.pop(chat_id, None)
         await _cleanup_prompts_ui(bot, chat_id)
         watchers = wc.load_all()
-        text = "Watchers:" if watchers else "No watchers configured."
-        await query.message.edit_text(text, reply_markup=_watchers_list_kb(watchers))  # type: ignore[union-attr]
+        await query.message.edit_text(  # type: ignore[union-attr]
+            _watchers_list_text(watchers),
+            reply_markup=_watchers_list_kb(watchers),
+            parse_mode="HTML",
+        )
         await query.answer()
 
     # ── Watcher actions ────────────────────────────────────────────────────────
 
     @dp.callback_query(F.data.startswith("w:actions:"))
-    async def cb_actions(query: CallbackQuery) -> None:
-        _pending.pop(query.message.chat.id, None)  # type: ignore[union-attr]
+    async def cb_actions(query: CallbackQuery, bot: Bot) -> None:
+        chat_id = query.message.chat.id  # type: ignore[union-attr]
+        _pending.pop(chat_id, None)
         wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
         w = wc.get(wid)
         if w is None:
             await query.answer("Watcher not found.", show_alert=True)
             return
+        # Clean up individual prompt messages if navigating back from prompts view.
+        ui = _prompts_ui.pop(chat_id, None)
+        if ui:
+            for mid in ui.get("prompt_msg_ids", []):
+                with contextlib.suppress(Exception):
+                    await bot.delete_message(chat_id, mid)
         await query.message.edit_text(  # type: ignore[union-attr]
             _watcher_info_text(w),
             reply_markup=_actions_kb(w),
@@ -390,7 +419,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         remaining = wc.load_all()
         if remaining:
             await query.message.edit_text(  # type: ignore[union-attr]
-                f"🗑 <b>{name}</b> deleted.\n\nWatchers:",
+                f"🗑 <b>{name}</b> deleted.\n\n{_watchers_list_text(remaining)}",
                 reply_markup=_watchers_list_kb(remaining),
                 parse_mode="HTML",
             )
@@ -400,31 +429,6 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
                 parse_mode="HTML",
             )
         await query.answer("Deleted.")
-
-    # ── Modify menu ────────────────────────────────────────────────────────────
-
-    @dp.callback_query(F.data.startswith("w:modify:"))
-    async def cb_modify(query: CallbackQuery, bot: Bot) -> None:
-        chat_id = query.message.chat.id  # type: ignore[union-attr]
-        _pending.pop(chat_id, None)
-        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
-        w = wc.get(wid)
-        if w is None:
-            await query.answer("Watcher not found.", show_alert=True)
-            return
-        # Clean up individual prompt messages if navigating back from prompts view.
-        ui = _prompts_ui.pop(chat_id, None)
-        if ui:
-            for mid in ui.get("prompt_msg_ids", []):
-                with contextlib.suppress(Exception):
-                    await bot.delete_message(chat_id, mid)
-            # current message is the add/back message — edit it into the modify menu
-        await query.message.edit_text(  # type: ignore[union-attr]
-            f"⚙️ Modify <b>{_html.escape(w.name)}</b>:",
-            reply_markup=_modify_kb(wid),
-            parse_mode="HTML",
-        )
-        await query.answer()
 
     # ── Interval editing ───────────────────────────────────────────────────────
 
@@ -436,11 +440,17 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             await query.answer("Watcher not found.", show_alert=True)
             return
         await query.message.delete()  # type: ignore[union-attr]
-        await query.message.answer(  # type: ignore[union-attr]
+        ask = await query.message.answer(  # type: ignore[union-attr]
             f"Current interval: <b>{w.interval}s</b>\n\nChoose the unit for the new interval:",
             reply_markup=_unit_sel_existing_kb(wid),
             parse_mode="HTML",
         )
+        _pending[query.message.chat.id] = {  # type: ignore[union-attr]
+            "action": "edit_interval_unit",
+            "watcher_id": wid,
+            "ask_msg_id": ask.message_id,
+            "return_to": "actions",
+        }
         await query.answer()
 
     @dp.callback_query(F.data.startswith("w:iunit:"))
@@ -461,7 +471,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             "watcher_id": wid,
             "unit": unit,
             "ask_msg_id": ask.message_id,
-            "return_to": "modify",
+            "return_to": "actions",
         }
         await query.answer()
 
@@ -476,7 +486,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             return
         await query.message.delete()  # type: ignore[union-attr]
         ask = await query.message.answer(  # type: ignore[union-attr]
-            f"Current name: <b>{_html.escape(w.name)}</b>\n\nSend the new name:",
+            f"Current name:\n\n<code>{_html.escape(w.name)}</code>\n\nSend the new name:",
             reply_markup=_input_cancel_kb(wid),
             parse_mode="HTML",
         )
@@ -484,7 +494,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             "action": "edit_name",
             "watcher_id": wid,
             "ask_msg_id": ask.message_id,
-            "return_to": "modify",
+            "return_to": "actions",
         }
         await query.answer()
 
@@ -585,8 +595,12 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             await query.message.delete()  # type: ignore[union-attr]
         await query.answer("Cancelled.")
         watchers = wc.load_all()
-        text = "Watchers:" if watchers else "No watchers configured."
-        await bot.send_message(chat_id, text, reply_markup=_watchers_list_kb(watchers))
+        await bot.send_message(
+            chat_id,
+            _watchers_list_text(watchers),
+            reply_markup=_watchers_list_kb(watchers),
+            parse_mode="HTML",
+        )
 
     @dp.callback_query(F.data.startswith("w:nwiunit:"))
     async def cb_nwiunit(query: CallbackQuery) -> None:
@@ -679,8 +693,8 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             await _cleanup_input()
             await bot.send_message(
                 message.chat.id,
-                f"⚙️ Modify <b>{_html.escape(w.name)}</b>:\n✅ Name updated.",
-                reply_markup=_modify_kb(w.id),
+                f"{_watcher_info_text(w)}\n✅ Name updated.",
+                reply_markup=_actions_kb(w),
                 parse_mode="HTML",
             )
 
@@ -701,8 +715,8 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             await _cleanup_input()
             await bot.send_message(
                 message.chat.id,
-                f"⚙️ Modify <b>{_html.escape(w.name)}</b>:\n✅ Interval updated to <b>{w.interval}s</b>.",
-                reply_markup=_modify_kb(w.id),
+                f"{_watcher_info_text(w)}\n✅ Interval updated to <b>{w.interval}s</b>.",
+                reply_markup=_actions_kb(w),
                 parse_mode="HTML",
             )
 
@@ -791,6 +805,10 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
                 "ask_msg_id": ask.message_id,
             }
 
+        # ── interval unit chosen via button — text input not expected ────────────
+        elif action == "edit_interval_unit":
+            await message.answer("Please choose a unit using the buttons above.")
+
         # ── new watcher: unit chosen via button — text input not expected ───────
         elif action == "new_watcher_interval_unit":
             await message.answer("Please choose a unit using the buttons above.")
@@ -845,11 +863,11 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
 
 
 _BOT_COMMANDS = [
-    BotCommand(command="watchers",  description="Manage watchers"),
-    BotCommand(command="clipboard", description="Set clipboard text"),
-    BotCommand(command="status",    description="Service status"),
-    BotCommand(command="help",      description="Show help"),
-    BotCommand(command="start",     description="Greeting"),
+    BotCommand(command="watchers",  description="Watchers"),
+    BotCommand(command="clipboard", description="Clipboard"),
+    BotCommand(command="status",    description="Status"),
+    BotCommand(command="help",      description="Help"),
+    BotCommand(command="start",     description="Start"),
 ]
 
 
