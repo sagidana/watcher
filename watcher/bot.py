@@ -15,6 +15,7 @@ import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -123,10 +124,12 @@ async def _render_prompts(bot: Bot, chat_id: int, wid: str) -> None:
     if w is None:
         return
 
+    total = len(w.prompts)
     prompt_msg_ids: list[int] = []
     for i, p in enumerate(w.prompts):
+        header = f"<b>Prompt {i + 1} / {total}</b>\n\n"
         msg = await bot.send_message(
-            chat_id, _html.escape(p),
+            chat_id, header + _html.escape(p),
             reply_markup=_prompt_kb(wid, i),
             parse_mode="HTML",
         )
@@ -333,6 +336,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         if w is None:
             await query.answer("Watcher not found.", show_alert=True)
             return
+        await query.message.delete()  # type: ignore[union-attr]
         ask = await query.message.answer(  # type: ignore[union-attr]
             f"Current interval: <b>{w.interval}s</b>\n\nSend the new interval in seconds:",
             reply_markup=_input_cancel_kb(wid),
@@ -387,6 +391,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         if idx < 0 or idx >= len(w.prompts):
             await query.answer("Prompt not found.", show_alert=True)
             return
+        await query.message.delete()  # type: ignore[union-attr]
         ask = await query.message.answer(  # type: ignore[union-attr]
             f"Current prompt {idx + 1}:\n\n<code>{_html.escape(w.prompts[idx])}</code>\n\nSend the new text:",
             reply_markup=_input_cancel_kb(wid),
@@ -407,6 +412,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         if wc.get(wid) is None:
             await query.answer("Watcher not found.", show_alert=True)
             return
+        await query.message.delete()  # type: ignore[union-attr]
         ask = await query.message.answer(  # type: ignore[union-attr]
             "Send the new prompt text:",
             reply_markup=_input_cancel_kb(wid),
@@ -503,10 +509,21 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
     return dp
 
 
+_BOT_COMMANDS = [
+    BotCommand(command="watchers", description="Manage watchers"),
+    BotCommand(command="status",   description="Service status"),
+    BotCommand(command="help",     description="Show help"),
+    BotCommand(command="start",    description="Greeting"),
+]
+
+
 async def run_bot(settings: Settings) -> None:
     """Start the bot and block until cancelled."""
     bot = Bot(token=settings.telegram.token)
     dp = _build_dispatcher(settings.telegram.chat_id)
+
+    await bot.set_my_commands(_BOT_COMMANDS)
+    log.info("bot commands registered: %s", [c.command for c in _BOT_COMMANDS])
 
     log.info(
         "[bot] starting (chat_id=%d, poll_timeout=%ds)",
