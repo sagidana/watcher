@@ -220,13 +220,26 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
 # Engine: watches the watchers dir and manages tasks
 # ---------------------------------------------------------------------------
 
+def _config_changed(old: WatcherConfig, new: WatcherConfig) -> bool:
+    return old.url != new.url or old.interval != new.interval or old.prompts != new.prompts
+
+
+async def _cancel_task(task: asyncio.Task) -> None:
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
 async def run_engine(settings: Settings) -> None:
     """
     Continuously scan the watchers directory and maintain one asyncio task
-    per enabled watcher.  Handles add/remove/disable dynamically.
+    per enabled watcher.  Handles add/remove/disable/config-change dynamically.
     """
     log.info("Engine starting (rescan every %ds)", RESCAN_INTERVAL)
     tasks: dict[str, asyncio.Task] = {}
+    configs: dict[str, WatcherConfig] = {}  # config each task was started with
 
     try:
         while True:
@@ -236,21 +249,24 @@ async def run_engine(settings: Settings) -> None:
             for wid in list(tasks):
                 if wid not in current:
                     log.info("Stopping watcher task: %s", wid)
-                    tasks[wid].cancel()
-                    try:
-                        await tasks[wid]
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                    del tasks[wid]
+                    await _cancel_task(tasks.pop(wid))
+                    configs.pop(wid, None)
 
-            # Start tasks for new watchers
+            # Start tasks for new watchers or restart tasks whose config changed
             for wid, watcher in current.items():
-                if wid not in tasks or tasks[wid].done():
-                    task = asyncio.create_task(
-                        _watch_task(settings, watcher),
-                        name=f"watch-{wid}",
-                    )
-                    tasks[wid] = task
+                if wid in tasks and not tasks[wid].done():
+                    if _config_changed(configs[wid], watcher):
+                        log.info("Config changed for watcher %s — restarting task", wid)
+                        await _cancel_task(tasks.pop(wid))
+                        configs.pop(wid, None)
+                    else:
+                        continue
+                task = asyncio.create_task(
+                    _watch_task(settings, watcher),
+                    name=f"watch-{wid}",
+                )
+                tasks[wid] = task
+                configs[wid] = watcher
 
             await asyncio.sleep(RESCAN_INTERVAL)
 
