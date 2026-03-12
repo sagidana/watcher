@@ -75,6 +75,12 @@ _pending: dict[int, dict] = {}
 _prompts_ui: dict[int, dict] = {}
 
 
+# ── interval unit helpers ──────────────────────────────────────────────────────
+
+_UNIT_LABELS: dict[str, str] = {"s": "Seconds", "m": "Minutes", "h": "Hours", "d": "Days"}
+_UNIT_MULT:   dict[str, int] = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
 # ── keyboard / text builders ───────────────────────────────────────────────────
 
 def _done_btn() -> InlineKeyboardButton:
@@ -120,6 +126,26 @@ def _skip_prompt_kb() -> InlineKeyboardMarkup:
     ]])
 
 
+def _unit_sel_existing_kb(wid: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Seconds", callback_data=f"w:iunit:{wid}:s"),
+         InlineKeyboardButton(text="Minutes", callback_data=f"w:iunit:{wid}:m")],
+        [InlineKeyboardButton(text="Hours",   callback_data=f"w:iunit:{wid}:h"),
+         InlineKeyboardButton(text="Days",    callback_data=f"w:iunit:{wid}:d")],
+        [InlineKeyboardButton(text="✖ Cancel", callback_data=f"w:cancel_input:{wid}")],
+    ])
+
+
+def _unit_sel_new_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Seconds", callback_data="w:nwiunit:s"),
+         InlineKeyboardButton(text="Minutes", callback_data="w:nwiunit:m")],
+        [InlineKeyboardButton(text="Hours",   callback_data="w:nwiunit:h"),
+         InlineKeyboardButton(text="Days",    callback_data="w:nwiunit:d")],
+        [InlineKeyboardButton(text="✖ Cancel", callback_data="w:cancel_new_watcher")],
+    ])
+
+
 def _actions_kb(w: wc.WatcherConfig) -> InlineKeyboardMarkup:
     toggle = "🔴 Disable" if w.enabled else "🟢 Enable"
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -133,6 +159,7 @@ def _actions_kb(w: wc.WatcherConfig) -> InlineKeyboardMarkup:
 
 def _modify_kb(wid: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Rename",   callback_data=f"w:rename:{wid}")],
         [InlineKeyboardButton(text="⏱ Interval", callback_data=f"w:interval:{wid}")],
         [InlineKeyboardButton(text="📝 Prompts",  callback_data=f"w:prompts:{wid}")],
         [InlineKeyboardButton(text="◀ Back",      callback_data=f"w:actions:{wid}"),
@@ -409,13 +436,52 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             await query.answer("Watcher not found.", show_alert=True)
             return
         await query.message.delete()  # type: ignore[union-attr]
+        await query.message.answer(  # type: ignore[union-attr]
+            f"Current interval: <b>{w.interval}s</b>\n\nChoose the unit for the new interval:",
+            reply_markup=_unit_sel_existing_kb(wid),
+            parse_mode="HTML",
+        )
+        await query.answer()
+
+    @dp.callback_query(F.data.startswith("w:iunit:"))
+    async def cb_iunit(query: CallbackQuery) -> None:
+        parts = query.data.split(":")  # type: ignore[union-attr]
+        wid, unit = parts[2], parts[3]
+        if wc.get(wid) is None:
+            await query.answer("Watcher not found.", show_alert=True)
+            return
+        label = _UNIT_LABELS[unit]
+        await query.message.delete()  # type: ignore[union-attr]
         ask = await query.message.answer(  # type: ignore[union-attr]
-            f"Current interval: <b>{w.interval}s</b>\n\nSend the new interval in seconds:",
+            f"Send the new interval in {label.lower()}:",
+            reply_markup=_input_cancel_kb(wid),
+        )
+        _pending[query.message.chat.id] = {  # type: ignore[union-attr]
+            "action": "edit_interval",
+            "watcher_id": wid,
+            "unit": unit,
+            "ask_msg_id": ask.message_id,
+            "return_to": "modify",
+        }
+        await query.answer()
+
+    # ── Rename ─────────────────────────────────────────────────────────────────
+
+    @dp.callback_query(F.data.startswith("w:rename:"))
+    async def cb_rename(query: CallbackQuery) -> None:
+        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
+        w = wc.get(wid)
+        if w is None:
+            await query.answer("Watcher not found.", show_alert=True)
+            return
+        await query.message.delete()  # type: ignore[union-attr]
+        ask = await query.message.answer(  # type: ignore[union-attr]
+            f"Current name: <b>{_html.escape(w.name)}</b>\n\nSend the new name:",
             reply_markup=_input_cancel_kb(wid),
             parse_mode="HTML",
         )
         _pending[query.message.chat.id] = {  # type: ignore[union-attr]
-            "action": "edit_interval",
+            "action": "edit_name",
             "watcher_id": wid,
             "ask_msg_id": ask.message_id,
             "return_to": "modify",
@@ -522,6 +588,29 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         text = "Watchers:" if watchers else "No watchers configured."
         await bot.send_message(chat_id, text, reply_markup=_watchers_list_kb(watchers))
 
+    @dp.callback_query(F.data.startswith("w:nwiunit:"))
+    async def cb_nwiunit(query: CallbackQuery) -> None:
+        chat_id = query.message.chat.id  # type: ignore[union-attr]
+        unit = query.data.split(":", 2)[2]  # type: ignore[union-attr]
+        pending = _pending.get(chat_id)
+        if not pending:
+            await query.answer("Session expired.", show_alert=True)
+            return
+        label = _UNIT_LABELS[unit]
+        await query.message.delete()  # type: ignore[union-attr]
+        ask = await query.message.answer(  # type: ignore[union-attr]
+            f"Send the interval in {label.lower()}:",
+            reply_markup=_cancel_new_watcher_kb(),
+        )
+        _pending[chat_id] = {
+            "action": "new_watcher_interval",
+            "url": pending["url"],
+            "name": pending["name"],
+            "unit": unit,
+            "ask_msg_id": ask.message_id,
+        }
+        await query.answer()
+
     @dp.callback_query(F.data == "w:skip_prompt")
     async def cb_skip_prompt(query: CallbackQuery, bot: Bot) -> None:
         chat_id = query.message.chat.id  # type: ignore[union-attr]
@@ -574,17 +663,39 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             with contextlib.suppress(Exception):
                 await message.delete()
 
-        # ── waiting for a new interval value ───────────────────────────────────
-        if action == "edit_interval":
-            if not text.isdigit() or int(text) <= 0:
-                await message.answer("Please send a positive integer (seconds).")
+        # ── waiting for a new name ─────────────────────────────────────────────
+        if action == "edit_name":
+            if not text:
+                await message.answer("Please send a non-empty name.")
                 return
             w = wc.get(pending["watcher_id"])
             if w is None:
                 _pending.pop(message.chat.id, None)
                 await _cleanup_input()
                 return
-            w.interval = int(text)
+            w.name = text
+            wc.save(w)
+            _pending.pop(message.chat.id, None)
+            await _cleanup_input()
+            await bot.send_message(
+                message.chat.id,
+                f"⚙️ Modify <b>{_html.escape(w.name)}</b>:\n✅ Name updated.",
+                reply_markup=_modify_kb(w.id),
+                parse_mode="HTML",
+            )
+
+        # ── waiting for a new interval value ───────────────────────────────────
+        elif action == "edit_interval":
+            if not text.isdigit() or int(text) <= 0:
+                await message.answer("Please send a positive integer.")
+                return
+            w = wc.get(pending["watcher_id"])
+            if w is None:
+                _pending.pop(message.chat.id, None)
+                await _cleanup_input()
+                return
+            unit = pending.get("unit", "s")
+            w.interval = int(text) * _UNIT_MULT[unit]
             wc.save(w)
             _pending.pop(message.chat.id, None)
             await _cleanup_input()
@@ -670,22 +781,27 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             await _cleanup_input()
             ask = await bot.send_message(
                 message.chat.id,
-                "Send the check interval in seconds (e.g. 300):",
-                reply_markup=_cancel_new_watcher_kb(),
+                "Choose the interval unit:",
+                reply_markup=_unit_sel_new_kb(),
             )
             _pending[message.chat.id] = {
-                "action": "new_watcher_interval",
+                "action": "new_watcher_interval_unit",
                 "url": pending["url"],
                 "name": text,
                 "ask_msg_id": ask.message_id,
             }
 
-        # ── new watcher: waiting for interval ──────────────────────────────────
+        # ── new watcher: unit chosen via button — text input not expected ───────
+        elif action == "new_watcher_interval_unit":
+            await message.answer("Please choose a unit using the buttons above.")
+
+        # ── new watcher: waiting for interval value ─────────────────────────────
         elif action == "new_watcher_interval":
             if not text.isdigit() or int(text) <= 0:
-                await message.answer("Please send a positive integer (seconds).")
+                await message.answer("Please send a positive integer.")
                 return
-            interval = int(text)
+            unit = pending.get("unit", "s")
+            interval = int(text) * _UNIT_MULT[unit]
             await _cleanup_input()
             ask = await bot.send_message(
                 message.chat.id,
