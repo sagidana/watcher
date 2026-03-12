@@ -476,6 +476,86 @@ def cmd_reload(_args: argparse.Namespace) -> None:
         console.print(f"[red]✗[/red] Reload failed:\n{result.stderr}")
 
 
+def _load_telegram_credentials() -> tuple[str, str]:
+    """Load TELEGRAM_TOKEN and TELEGRAM_CHAT_ID from ~/.config/watcher/.env.
+
+    Exits with an error message if credentials are missing.
+    """
+    env_file = CONFIG_DIR / ".env"
+    if not env_file.exists():
+        console.print(f"[red]✗[/red] .env not found at [cyan]{env_file}[/cyan]. Run [cyan]watcher install[/cyan] first.")
+        sys.exit(1)
+
+    creds: dict[str, str] = {}
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            k, _, v = line.partition("=")
+            creds[k.strip()] = v.strip()
+
+    token = creds.get("TELEGRAM_TOKEN", "")
+    chat_id = creds.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id or "your-" in token or "your-" in chat_id:
+        console.print("[red]✗[/red] TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set. Run [cyan]watcher install[/cyan] first.")
+        sys.exit(1)
+
+    return token, chat_id
+
+
+def cmd_message(args: argparse.Namespace) -> None:
+    """Send a Telegram message (text and/or file) to the configured chat."""
+    token, chat_id = _load_telegram_credentials()
+
+    text: str | None = args.text
+    file_path: Path | None = Path(args.file) if args.file else None
+
+    if not text and not file_path:
+        console.print("[red]✗[/red] Provide at least one of --text or --file.")
+        sys.exit(1)
+
+    if file_path and not file_path.exists():
+        console.print(f"[red]✗[/red] File not found: [cyan]{file_path}[/cyan]")
+        sys.exit(1)
+
+    if text:
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=15,
+            )
+            data = resp.json()
+        except requests.RequestException as exc:
+            console.print(f"[red]✗[/red] Network error: {exc}")
+            sys.exit(1)
+
+        if not data.get("ok"):
+            console.print(f"[red]✗[/red] Telegram error: {data.get('description', 'unknown')}")
+            sys.exit(1)
+
+        console.print("[green]✓[/green] Message sent")
+
+    if file_path:
+        try:
+            with file_path.open("rb") as fh:
+                resp = requests.post(
+                    f"https://api.telegram.org/bot{token}/sendDocument",
+                    data={"chat_id": chat_id},
+                    files={"document": (file_path.name, fh)},
+                    timeout=60,
+                )
+            data = resp.json()
+        except requests.RequestException as exc:
+            console.print(f"[red]✗[/red] Network error: {exc}")
+            sys.exit(1)
+
+        if not data.get("ok"):
+            console.print(f"[red]✗[/red] Telegram error: {data.get('description', 'unknown')}")
+            sys.exit(1)
+
+        console.print(f"[green]✓[/green] File sent: [cyan]{file_path.name}[/cyan]")
+
+
 def _init_db() -> None:
     """Create config dir and initialise the SQLite schema."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -528,6 +608,10 @@ def main() -> None:
     sub.add_parser("reload", help="Reload watchers config without full restart")
     sub.add_parser("watch", help="Open browser picker to add a new watcher")
 
+    msg_parser = sub.add_parser("message", help="Send a Telegram message or file to the configured chat")
+    msg_parser.add_argument("--text", metavar="TEXT", help="Text to send")
+    msg_parser.add_argument("--file", metavar="PATH", help="File to send as a document")
+
     args = parser.parse_args()
 
     commands = {
@@ -537,6 +621,7 @@ def main() -> None:
         "run": cmd_run,
         "reload": cmd_reload,
         "watch": cmd_watch,
+        "message": cmd_message,
     }
     commands[args.command](args)
 
