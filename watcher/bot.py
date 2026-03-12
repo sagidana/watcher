@@ -11,6 +11,9 @@ import asyncio
 import contextlib
 import html as _html
 import logging
+import secrets
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -78,6 +81,19 @@ def _done_btn() -> InlineKeyboardButton:
     return InlineKeyboardButton(text="✖ Done", callback_data="w:done")
 
 
+def _name_from_url(url: str) -> str:
+    """Deduce a short display name from a URL."""
+    try:
+        p = urlparse(url)
+        host = p.netloc
+        if host.startswith("www."):
+            host = host[4:]
+        path = p.path.rstrip("/")
+        return (host + path) if path else host
+    except Exception:
+        return url
+
+
 def _watchers_list_kb(watchers: list[wc.WatcherConfig]) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(
@@ -86,8 +102,22 @@ def _watchers_list_kb(watchers: list[wc.WatcherConfig]) -> InlineKeyboardMarkup:
         )]
         for w in watchers
     ]
+    rows.append([InlineKeyboardButton(text="➕ Add watcher", callback_data="w:add_watcher")])
     rows.append([_done_btn()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _cancel_new_watcher_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✖ Cancel", callback_data="w:cancel_new_watcher"),
+    ]])
+
+
+def _skip_prompt_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⏭ Skip", callback_data="w:skip_prompt"),
+        InlineKeyboardButton(text="✖ Cancel", callback_data="w:cancel_new_watcher"),
+    ]])
 
 
 def _actions_kb(w: wc.WatcherConfig) -> InlineKeyboardMarkup:
@@ -239,10 +269,8 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         log.info("cmd=watchers chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
         _pending.pop(message.chat.id, None)
         watchers = wc.load_all()
-        if not watchers:
-            await message.answer("No watchers configured.", reply_markup=ReplyKeyboardRemove())
-            return
-        await message.answer("Watchers:", reply_markup=_watchers_list_kb(watchers))
+        text = "Watchers:" if watchers else "No watchers configured."
+        await message.answer(text, reply_markup=_watchers_list_kb(watchers))
 
     # ── Done — close session at any stage ──────────────────────────────────────
 
@@ -288,10 +316,8 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         _pending.pop(chat_id, None)
         await _cleanup_prompts_ui(bot, chat_id)
         watchers = wc.load_all()
-        if not watchers:
-            await query.message.edit_text("No watchers configured.")  # type: ignore[union-attr]
-        else:
-            await query.message.edit_text("Watchers:", reply_markup=_watchers_list_kb(watchers))  # type: ignore[union-attr]
+        text = "Watchers:" if watchers else "No watchers configured."
+        await query.message.edit_text(text, reply_markup=_watchers_list_kb(watchers))  # type: ignore[union-attr]
         await query.answer()
 
     # ── Watcher actions ────────────────────────────────────────────────────────
@@ -471,6 +497,58 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         }
         await query.answer()
 
+    # ── Add watcher flow ───────────────────────────────────────────────────────
+
+    @dp.callback_query(F.data == "w:add_watcher")
+    async def cb_add_watcher(query: CallbackQuery) -> None:
+        chat_id = query.message.chat.id  # type: ignore[union-attr]
+        _pending.pop(chat_id, None)
+        await query.message.delete()  # type: ignore[union-attr]
+        ask = await query.message.answer(  # type: ignore[union-attr]
+            "Send the URL to watch:",
+            reply_markup=_cancel_new_watcher_kb(),
+        )
+        _pending[chat_id] = {"action": "new_watcher_url", "ask_msg_id": ask.message_id}
+        await query.answer()
+
+    @dp.callback_query(F.data == "w:cancel_new_watcher")
+    async def cb_cancel_new_watcher(query: CallbackQuery, bot: Bot) -> None:
+        chat_id = query.message.chat.id  # type: ignore[union-attr]
+        _pending.pop(chat_id, None)
+        with contextlib.suppress(Exception):
+            await query.message.delete()  # type: ignore[union-attr]
+        await query.answer("Cancelled.")
+        watchers = wc.load_all()
+        text = "Watchers:" if watchers else "No watchers configured."
+        await bot.send_message(chat_id, text, reply_markup=_watchers_list_kb(watchers))
+
+    @dp.callback_query(F.data == "w:skip_prompt")
+    async def cb_skip_prompt(query: CallbackQuery, bot: Bot) -> None:
+        chat_id = query.message.chat.id  # type: ignore[union-attr]
+        pending = _pending.pop(chat_id, None)
+        with contextlib.suppress(Exception):
+            await query.message.delete()  # type: ignore[union-attr]
+        await query.answer()
+        if not pending:
+            return
+        new_w = wc.WatcherConfig(
+            id=secrets.token_hex(4),
+            name=pending["name"],
+            url=pending["url"],
+            interval=pending["interval"],
+            enabled=True,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            prompts=[],
+        )
+        wc.save(new_w)
+        log.info("new watcher created id=%s name=%r url=%r", new_w.id, new_w.name, new_w.url)
+        await bot.send_message(
+            chat_id,
+            _watcher_info_text(new_w),
+            reply_markup=_actions_kb(new_w),
+            parse_mode="HTML",
+        )
+
     # ── Single message handler — dispatches by pending action ──────────────────
 
     @dp.message()
@@ -564,6 +642,88 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             _pending.pop(message.chat.id, None)
             await _cleanup_input()
             await _render_prompts(bot, message.chat.id, wid)
+
+        # ── new watcher: waiting for URL ────────────────────────────────────────
+        elif action == "new_watcher_url":
+            if not text:
+                await message.answer("Please send a non-empty URL.")
+                return
+            suggested = _name_from_url(text)
+            await _cleanup_input()
+            ask = await bot.send_message(
+                message.chat.id,
+                f"Send a name for this watcher (suggested: <code>{_html.escape(suggested)}</code>):",
+                reply_markup=_cancel_new_watcher_kb(),
+                parse_mode="HTML",
+            )
+            _pending[message.chat.id] = {
+                "action": "new_watcher_name",
+                "url": text,
+                "ask_msg_id": ask.message_id,
+            }
+
+        # ── new watcher: waiting for name ───────────────────────────────────────
+        elif action == "new_watcher_name":
+            if not text:
+                await message.answer("Please send a non-empty name.")
+                return
+            await _cleanup_input()
+            ask = await bot.send_message(
+                message.chat.id,
+                "Send the check interval in seconds (e.g. 300):",
+                reply_markup=_cancel_new_watcher_kb(),
+            )
+            _pending[message.chat.id] = {
+                "action": "new_watcher_interval",
+                "url": pending["url"],
+                "name": text,
+                "ask_msg_id": ask.message_id,
+            }
+
+        # ── new watcher: waiting for interval ──────────────────────────────────
+        elif action == "new_watcher_interval":
+            if not text.isdigit() or int(text) <= 0:
+                await message.answer("Please send a positive integer (seconds).")
+                return
+            interval = int(text)
+            await _cleanup_input()
+            ask = await bot.send_message(
+                message.chat.id,
+                "Send the first prompt for this watcher, or tap Skip to add later:",
+                reply_markup=_skip_prompt_kb(),
+            )
+            _pending[message.chat.id] = {
+                "action": "new_watcher_prompt",
+                "url": pending["url"],
+                "name": pending["name"],
+                "interval": interval,
+                "ask_msg_id": ask.message_id,
+            }
+
+        # ── new watcher: waiting for first prompt ──────────────────────────────
+        elif action == "new_watcher_prompt":
+            if not text:
+                await message.answer("Please send non-empty text, or tap Skip.")
+                return
+            await _cleanup_input()
+            _pending.pop(message.chat.id, None)
+            new_w = wc.WatcherConfig(
+                id=secrets.token_hex(4),
+                name=pending["name"],
+                url=pending["url"],
+                interval=pending["interval"],
+                enabled=True,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                prompts=[text],
+            )
+            wc.save(new_w)
+            log.info("new watcher created id=%s name=%r url=%r", new_w.id, new_w.name, new_w.url)
+            await bot.send_message(
+                message.chat.id,
+                _watcher_info_text(new_w),
+                reply_markup=_actions_kb(new_w),
+                parse_mode="HTML",
+            )
 
     return dp
 
