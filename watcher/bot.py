@@ -443,7 +443,7 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             filename = f"photo_{ts}.jpg"
         else:
             file_id = message.document.file_id  # type: ignore[union-attr]
-            filename = message.document.file_name or f"file_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"  # type: ignore[union-attr]
+            filename = f"file_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.doc"  # type: ignore[union-attr]
 
         dest = _FILES_DIR / filename
         if dest.exists():
