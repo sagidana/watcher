@@ -188,7 +188,7 @@ async def fetch_once(settings: Settings, watcher: WatcherConfig) -> str:
     """
     fetcher = BrowserFetcher()
     try:
-        await fetcher.start(watcher.url)
+        await fetcher.start(watcher.url, headless=not settings.headed)
         last_hash, last_text = _get_snapshot(watcher.id)
         new_hash, new_text, changed = await _poll_once(
             settings, watcher, fetcher, last_hash, last_text
@@ -208,7 +208,7 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
 
     try:
         log.info("[watch:%s] launching browser fetcher", watcher.id)
-        await fetcher.start(watcher.url)
+        await fetcher.start(watcher.url, headless=not settings.headed)
         log.info("[watch:%s] browser fetcher ready", watcher.id)
     except Exception:
         log.exception("[watch:%s] failed to start fetcher", watcher.id)

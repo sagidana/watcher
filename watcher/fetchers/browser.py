@@ -63,12 +63,12 @@ class BrowserFetcher:
         self._page = None
         self._url: str = ""
 
-    async def start(self, url: str) -> None:
+    async def start(self, url: str, headless: bool = True) -> None:
         from playwright.async_api import async_playwright
 
         self._url = url
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=True)
+        self._browser = await self._playwright.chromium.launch(headless=headless)
         self._context = await self._browser.new_context(user_agent=_USER_AGENT)
         self._page = await self._context.new_page()
 

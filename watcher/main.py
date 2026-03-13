@@ -16,8 +16,9 @@ LOG_FILE = Path("/tmp/watcher.log")
 log = logging.getLogger("watcher")
 
 
-async def run() -> None:
+async def run(headed: bool = False) -> None:
     settings = load_settings()
+    settings.headed = headed
 
     logging.basicConfig(
         level=getattr(logging, settings.log_level, logging.INFO),

@@ -27,6 +27,7 @@ class TelegramSettings:
 class Settings:
     telegram: TelegramSettings
     log_level: str = "INFO"
+    headed: bool = False
 
 
 def load_settings() -> Settings:

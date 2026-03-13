@@ -36,15 +36,6 @@ UNIT_PATH = SYSTEMD_USER_DIR / UNIT_NAME
 LOG_FILE = Path("/tmp/watcher.log")
 
 
-def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
-    )
-
-
-
 def _python_bin() -> str:
     """Path to the Python interpreter running this process."""
     return sys.executable
@@ -370,7 +361,6 @@ def cmd_status(_args: argparse.Namespace) -> None:
 
 def cmd_run(_args: argparse.Namespace) -> None:
     """Run the watcher in the foreground (development mode)."""
-    _setup_logging()
     console.print("[bold]Starting watcher in foreground (Ctrl-C to stop)...[/bold]\n")
     try:
         from dotenv import load_dotenv
@@ -379,7 +369,7 @@ def cmd_run(_args: argparse.Namespace) -> None:
         pass
     from watcher.main import run
     import asyncio
-    asyncio.run(run())
+    asyncio.run(run(headed=True))
 
 
 
