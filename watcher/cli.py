@@ -558,41 +558,10 @@ def cmd_message(args: argparse.Namespace) -> None:
 
 
 def _init_db() -> None:
-    """Create config dir and initialise the SQLite schema."""
+    """Create config dir structure."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     (CONFIG_DIR / "sessions").mkdir(exist_ok=True)
-
-    db_path = CONFIG_DIR / "state.db"
-    import sqlite3
-    conn = sqlite3.connect(db_path)
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS watchers (
-            id          TEXT PRIMARY KEY,
-            name        TEXT NOT NULL,
-            url         TEXT NOT NULL,
-            config_json TEXT NOT NULL,
-            enabled     INTEGER NOT NULL DEFAULT 1,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS snapshots (
-            watcher_id  TEXT NOT NULL,
-            hash        TEXT NOT NULL,
-            snapshot    TEXT,
-            checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
-            PRIMARY KEY (watcher_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS runs (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            watcher_id  TEXT NOT NULL,
-            status      TEXT NOT NULL,   -- ok | changed | error
-            detail      TEXT,
-            ran_at      TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-    """)
-    conn.commit()
-    conn.close()
+    (CONFIG_DIR / "watchers").mkdir(exist_ok=True)
 
 
 def main() -> None:

@@ -20,8 +20,6 @@ from typing import Optional
 # subprocess works even when systemd doesn't have pyenv shims on PATH.
 _CAI_BIN = str(Path(sys.executable).parent / "cai")
 
-import aiosqlite
-
 from .config import Settings
 from .fetchers.browser import BrowserFetcher
 from .notifier import build_short_diff, notify_change
@@ -29,47 +27,32 @@ from .watchers_config import WatcherConfig, load_all
 
 log = logging.getLogger("watcher.engine")
 
-DB_PATH = Path("~/.config/watcher/state.db").expanduser()
+SNAPSHOTS_DIR = Path("~/.config/watcher/watchers").expanduser()
 RESCAN_INTERVAL = 10  # seconds between directory scans
 
 
 # ---------------------------------------------------------------------------
-# DB helpers (async)
+# Snapshot helpers (file-based)
 # ---------------------------------------------------------------------------
 
-async def _get_snapshot(watcher_id: str) -> tuple[Optional[str], Optional[str]]:
-    """Return (hash, text) for watcher_id, or (None, None) if not seen yet."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT hash, snapshot FROM snapshots WHERE watcher_id = ?", (watcher_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    return (row[0], row[1]) if row else (None, None)
+def _snapshot_path(watcher_id: str) -> Path:
+    return SNAPSHOTS_DIR / f"{watcher_id}.snapshot"
 
 
-async def _save_snapshot(watcher_id: str, h: str, text: str) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO snapshots (watcher_id, hash, snapshot, checked_at)
-            VALUES (?, ?, ?, datetime('now'))
-            ON CONFLICT(watcher_id) DO UPDATE SET
-                hash       = excluded.hash,
-                snapshot   = excluded.snapshot,
-                checked_at = excluded.checked_at
-            """,
-            (watcher_id, h, text),
-        )
-        await db.commit()
+def _get_snapshot(watcher_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (hash, text) or (None, None) if no snapshot exists yet."""
+    path = _snapshot_path(watcher_id)
+    if not path.exists():
+        return None, None
+    data = path.read_text(encoding="utf-8")
+    first_newline = data.index("\n")
+    return data[:first_newline], data[first_newline + 1:]
 
 
-async def _record_run(watcher_id: str, status: str, detail: str = "") -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO runs (watcher_id, status, detail) VALUES (?, ?, ?)",
-            (watcher_id, status, detail or None),
-        )
-        await db.commit()
+def _save_snapshot(watcher_id: str, h: str, text: str) -> None:
+    path = _snapshot_path(watcher_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{h}\n{text}", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -206,17 +189,14 @@ async def fetch_once(settings: Settings, watcher: WatcherConfig) -> str:
     fetcher = BrowserFetcher()
     try:
         await fetcher.start(watcher.url)
-        last_hash, last_text = await _get_snapshot(watcher.id)
+        last_hash, last_text = _get_snapshot(watcher.id)
         new_hash, new_text, changed = await _poll_once(
             settings, watcher, fetcher, last_hash, last_text
         )
-        await _save_snapshot(watcher.id, new_hash, new_text)
-        status = "changed" if changed else "ok"
-        await _record_run(watcher.id, status)
-        return status
+        _save_snapshot(watcher.id, new_hash, new_text)
+        return "changed" if changed else "ok"
     except Exception:
         log.exception("[watch:%s] fetch_once failed", watcher.id)
-        await _record_run(watcher.id, "error", "fetch_once failed")
         return "error"
     finally:
         await fetcher.close()
@@ -232,10 +212,9 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
         log.info("[watch:%s] browser fetcher ready", watcher.id)
     except Exception:
         log.exception("[watch:%s] failed to start fetcher", watcher.id)
-        await _record_run(watcher.id, "error", "Failed to start fetcher")
         return
 
-    last_hash, last_text = await _get_snapshot(watcher.id)
+    last_hash, last_text = _get_snapshot(watcher.id)
 
     try:
         while True:
@@ -243,14 +222,12 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
                 new_hash, new_text, changed = await _poll_once(
                     settings, watcher, fetcher, last_hash, last_text
                 )
-                await _save_snapshot(watcher.id, new_hash, new_text)
+                _save_snapshot(watcher.id, new_hash, new_text)
                 last_hash, last_text = new_hash, new_text
-                await _record_run(watcher.id, "changed" if changed else "ok")
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("[watch:%s] unexpected error during poll", watcher.id)
-                await _record_run(watcher.id, "error", "Unexpected error — see logs")
 
             log.debug("[watch:%s] sleeping %ds", watcher.id, watcher.interval)
             await asyncio.sleep(watcher.interval)

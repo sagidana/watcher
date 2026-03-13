@@ -25,9 +25,6 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
 
-    # Database
-    "aiosqlite>=0.20",
-
     # Config / env
     "python-dotenv>=1.0",
     "pyyaml>=6.0",

@@ -123,7 +123,8 @@ class BrowserFetcher:
 
         try:
             content: str = await self._page.evaluate(_EXTRACT_JS, None)
-            log.debug("[browser] extracted %d chars from %s", len(content), self._url)
+            # log.debug("[browser] extracted %d chars from %s", len(content), self._url)
+            log.debug("[browser] '%s' -> extracted %s", self._url, content)
             return _normalise(content)
         except Exception:
             log.exception("[browser] extraction failed (%s)", self._url)

@@ -28,7 +28,6 @@ async def run() -> None:
         ],
     )
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
-    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 
     log.info("Watcher starting (log_level=%s)...", settings.log_level)
 
