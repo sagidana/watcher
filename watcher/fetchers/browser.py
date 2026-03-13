@@ -71,25 +71,59 @@ class BrowserFetcher:
         try:
             await self._page.reload(wait_until="networkidle", timeout=30_000)
         except Exception:
-            await self._page.reload(wait_until="domcontentloaded", timeout=20_000)
+            try:
+                await self._page.reload(wait_until="domcontentloaded", timeout=20_000)
+            except Exception as exc:
+                # Browser/page was closed (crash, OOM, etc.) — attempt full restart
+                log.warning("fetch [%s]: reload failed (%s), attempting browser restart", self._url, exc)
+                try:
+                    await self.close()
+                    await self.start(self._url)
+                except Exception as restart_exc:
+                    log.error("fetch [%s]: browser restart failed: %s", self._url, restart_exc)
+                    return ""
 
-        lines: list[str] = []
-        elements = self._page.locator("body *")
-        count = await elements.count()
-        for i in range(count):
-            el = elements.nth(i)
-            if await el.is_visible():
-                text = await el.inner_text()
-                if text.strip():
-                    lines.append(text.strip())
+        try:
+            content: str = await self._page.evaluate(
+                """
+                () => {
+                    const texts = [];
+                    const walker = document.createTreeWalker(
+                        document.body,
+                        NodeFilter.SHOW_TEXT,
+                        {
+                            acceptNode(node) {
+                                let el = node.parentElement;
+                                while (el) {
+                                    const s = window.getComputedStyle(el);
+                                    if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
+                                        return NodeFilter.FILTER_REJECT;
+                                    el = el.parentElement;
+                                }
+                                return NodeFilter.FILTER_ACCEPT;
+                            }
+                        }
+                    );
+                    let node;
+                    while ((node = walker.nextNode())) {
+                        const t = node.textContent.trim();
+                        if (t) texts.push(t);
+                    }
+                    return texts.join('\\n');
+                }
+                """,
+                None,
+            )
+            log.debug(
+                "[browser] extracted %d chars from %s",
+                len(content), self._url,
+            )
+            return _normalise(content)
+        except Exception as e:
+            log.info(f"[browser] ({self._url}): exception {e}")
 
-        content = "\n".join(lines)
-        log.debug(
-            "[browser] extracted %d chars from %d visible elements on %s",
-            len(content), count, self._url,
-        )
+        return ""
 
-        return _normalise(content)
 
     async def close(self) -> None:
         try:

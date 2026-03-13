@@ -169,8 +169,9 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
         while True:
             changed = False
             try:
-                log.debug("[watch:%s] fetching", watcher.id)
+                log.debug("[watch:%s] fetching %s", watcher.id, watcher.url)
                 text = await fetcher.fetch()
+                log.debug("[watch:%s] fetched %d chars: %s", watcher.id, len(text), text[:200])
                 h = hashlib.sha256(text.encode()).hexdigest()
 
                 if last_hash is not None and h != last_hash:
