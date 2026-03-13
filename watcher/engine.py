@@ -150,6 +150,51 @@ def is_content_empty(content) -> bool:
 
     return False
 
+
+async def _run_prompt_chain(watcher_id: str, prompts: list[str], diff: str) -> Optional[str]:
+    """Run diff through each prompt in sequence; stop early if a prompt returns empty."""
+    content: Optional[str] = diff
+    for i, prompt in enumerate(prompts):
+        log.info("[watch:%s] running prompt %d/%d", watcher_id, i + 1, len(prompts))
+        content = await _cai_filter(watcher_id, prompt, content)
+        if not content:
+            log.info("[watch:%s] prompt %d/%d produced empty result — stopping chain", watcher_id, i + 1, len(prompts))
+            break
+        log.info("[watch:%s] prompt %d/%d produced result: %s", watcher_id, i + 1, len(prompts), content)
+    return content or None
+
+
+async def _poll_once(
+    settings: Settings,
+    watcher: WatcherConfig,
+    fetcher: BrowserFetcher,
+    last_hash: Optional[str],
+    last_text: Optional[str],
+) -> tuple[str, str, bool]:
+    """Fetch, compare, and notify if changed. Returns (new_hash, new_text, changed)."""
+    log.debug("[watch:%s] fetching %s", watcher.id, watcher.url)
+    text = await fetcher.fetch()
+    log.debug("[watch:%s] fetched %d chars: %s", watcher.id, len(text), text[:200])
+    h = hashlib.sha256(text.encode()).hexdigest()
+
+    if last_hash is None or h == last_hash:
+        return h, text, False
+
+    log.info("[watch:%s] change detected", watcher.id)
+    diff = build_short_diff(last_text or "", text)
+    notification_text = (
+        await _run_prompt_chain(watcher.id, watcher.prompts, diff)
+        if watcher.prompts
+        else diff
+    )
+
+    if not is_content_empty(notification_text):
+        assert notification_text is not None
+        await notify_change(settings, watcher, notification_text)
+
+    return h, text, True
+
+
 async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
     log.info("[watch:%s] task started", watcher.id)
     fetcher = BrowserFetcher()
@@ -167,40 +212,14 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
 
     try:
         while True:
-            changed = False
             try:
-                log.debug("[watch:%s] fetching %s", watcher.id, watcher.url)
-                text = await fetcher.fetch()
-                log.debug("[watch:%s] fetched %d chars: %s", watcher.id, len(text), text[:200])
-                h = hashlib.sha256(text.encode()).hexdigest()
-
-                if last_hash is not None and h != last_hash:
-                    changed = True
-                    log.info("[watch:%s] change detected", watcher.id)
-                    diff = build_short_diff(last_text or "", text)
-                    if watcher.prompts:
-                        content: Optional[str] = diff
-                        for i, prompt in enumerate(watcher.prompts):
-                            log.info("[watch:%s] running prompt %d/%d", watcher.id, i + 1, len(watcher.prompts))
-                            content = await _cai_filter(watcher.id, prompt, content)
-                            if not content:
-                                log.info("[watch:%s] prompt %d/%d produced empty result — stopping chain", watcher.id, i + 1, len(watcher.prompts))
-                                break
-
-                            log.info("[watch:%s] prompt %d/%d produced result: %s", watcher.id, i + 1, len(watcher.prompts), content)
-                        notification_text = content or None
-                    else:
-                        notification_text = diff
-                    if not is_content_empty(notification_text):
-                        await notify_change(settings, watcher, notification_text)
-
-                await _save_snapshot(watcher.id, h, text)
-                last_hash = h
-                last_text = text
+                new_hash, new_text, changed = await _poll_once(
+                    settings, watcher, fetcher, last_hash, last_text
+                )
+                await _save_snapshot(watcher.id, new_hash, new_text)
+                last_hash, last_text = new_hash, new_text
                 await _record_run(watcher.id, "changed" if changed else "ok")
-
             except asyncio.CancelledError:
-                log.info("[watch:%s] cancelled inside poll loop", watcher.id)
                 raise
             except Exception:
                 log.exception("[watch:%s] unexpected error during poll", watcher.id)
@@ -233,6 +252,18 @@ async def _cancel_task(task: asyncio.Task) -> None:
         pass
 
 
+async def _shutdown_tasks(tasks: dict[str, asyncio.Task]) -> None:
+    log.info("[engine] cancelled — shutting down %d watch task(s)", len(tasks))
+    for wid, task in tasks.items():
+        log.info("[engine] cancelling watch task: %s", wid)
+        task.cancel()
+    log.info("[engine] waiting for all watch tasks to finish...")
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    for wid, result in zip(tasks.keys(), results):
+        log.info("[engine] watch task %s finished: %r", wid, result)
+    log.info("[engine] all watch tasks done — re-raising CancelledError")
+
+
 async def run_engine(settings: Settings) -> None:
     """
     Continuously scan the watchers directory and maintain one asyncio task
@@ -256,29 +287,18 @@ async def run_engine(settings: Settings) -> None:
             # Start tasks for new watchers or restart tasks whose config changed
             for wid, watcher in current.items():
                 if wid in tasks and not tasks[wid].done():
-                    if _config_changed(configs[wid], watcher):
-                        log.info("Config changed for watcher %s — restarting task", wid)
-                        await _cancel_task(tasks.pop(wid))
-                        configs.pop(wid, None)
-                    else:
+                    if not _config_changed(configs[wid], watcher):
                         continue
-                task = asyncio.create_task(
-                    _watch_task(settings, watcher),
-                    name=f"watch-{wid}",
+                    log.info("Config changed for watcher %s — restarting task", wid)
+                    await _cancel_task(tasks.pop(wid))
+                    configs.pop(wid, None)
+                tasks[wid] = asyncio.create_task(
+                    _watch_task(settings, watcher), name=f"watch-{wid}"
                 )
-                tasks[wid] = task
                 configs[wid] = watcher
 
             await asyncio.sleep(RESCAN_INTERVAL)
 
     except asyncio.CancelledError:
-        log.info("[engine] cancelled — shutting down %d watch task(s)", len(tasks))
-        for wid, task in tasks.items():
-            log.info("[engine] cancelling watch task: %s", wid)
-            task.cancel()
-        log.info("[engine] waiting for all watch tasks to finish...")
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        for wid, result in zip(tasks.keys(), results):
-            log.info("[engine] watch task %s finished: %r", wid, result)
-        log.info("[engine] all watch tasks done — re-raising CancelledError")
+        await _shutdown_tasks(tasks)
         raise
