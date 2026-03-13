@@ -23,39 +23,6 @@ to you via Telegram when something changes.
 
 ---
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│                   watcher (process)                  │
-│                                                      │
-│  ┌─────────────┐    ┌──────────────────────────────┐ │
-│  │   Engine    │───▶│  Watcher Tasks (per watcher) │ │
-│  │ (asyncio)   │    │  - Browser fetcher           │ │
-│  │ rescan/10s  │    │  - SHA-256 diff              │ │
-│  └─────────────┘    └──────────┬───────────────────┘ │
-│                                │ change detected      │
-│  ┌─────────────┐    ┌──────────▼───────────────────┐ │
-│  │ Telegram    │    │  Notifier (Telegram send)    │ │
-│  │ Bot Handler │    │  unified-diff summary        │ │
-│  │ /start      │    └──────────────────────────────┘ │
-│  │ /status     │                                     │
-│  │ /help       │                                     │
-│  └─────────────┘                                     │
-└──────────────────────────────────────────────────────┘
-         │
-         │ runs as
-         ▼
-  systemd --user service
-  (starts on login, restarts on crash)
-```
-
-The entire service runs inside a single `asyncio` event loop. The engine scans
-the watchers directory every 10 seconds and maintains one asyncio task per
-enabled watcher. The Telegram bot runs concurrently in the same loop.
-
----
-
 ## Project Structure
 
 ```
@@ -134,27 +101,6 @@ Stops and disables the service and removes the systemd unit file. Your data at
 
 ---
 
-## Adding Watchers
-
-Create a YAML file in `~/.config/watcher/watchers/`:
-
-```bash
-cat > ~/.config/watcher/watchers/mysite.yaml <<EOF
-id: mysite
-name: "My site price"
-url: https://example.com/product
-selector: "span.price"
-interval: 60
-enabled: true
-created_at: "2026-01-01T00:00:00+00:00"
-EOF
-```
-
-The running service picks it up within 10 seconds — no restart needed.
-
-You can also manage watchers interactively via the **Telegram bot** (see below).
-
----
 
 ## Configuration
 
@@ -164,7 +110,6 @@ You can also manage watchers interactively via the **Telegram bot** (see below).
 id: a1b2c3d4
 name: "Example page"
 url: https://example.com/page
-selector: "div.price"
 interval: 30          # seconds between checks
 enabled: true
 created_at: "2026-01-01T00:00:00+00:00"
@@ -180,8 +125,12 @@ Snapshots are stored alongside the YAML as `<id>.snapshot` — no database neede
 ### Service settings (`~/.config/watcher/settings.yaml`)
 
 ```yaml
+log_level: DEBUG
+
 telegram:
-  poll_timeout: 30   # seconds for each Telegram long-poll request (1-55)
+  # Seconds Telegram holds each long-poll request open (1-55).
+  # Higher = fewer API calls; lower = slightly faster cold-start response.
+  poll_timeout: 30
 ```
 
 ---
@@ -196,8 +145,7 @@ to avoid spawn overhead on every poll cycle.
 
 The fetcher:
 1. Navigates to the URL (with `networkidle` timeout, falling back to `domcontentloaded`)
-2. Queries the CSS selector
-3. Returns `inner_text()`, normalised (collapsed whitespace and blank lines)
+2. Returns visible text using javascript extraction code.
 
 ### Change Detection
 
@@ -243,7 +191,7 @@ to messages from your configured `TELEGRAM_CHAT_ID`.
 
 ### Inline watcher management
 
-From `/watchers` you can: enable/disable, rename, change interval, edit
+From `/watchers` you can: create new watcher, enable/disable, rename, change interval, edit
 prompts, trigger an immediate fetch, or delete any watcher — all without
 touching the YAML files directly.
 
@@ -276,8 +224,3 @@ touching the YAML files directly.
 - [x] Telegram bot with inline keyboard watcher management
 - [x] AI filter chain (`cai` prompt pipeline per watcher)
 
-### Planned
-- [ ] RSS fetcher (prefer when available)
-- [ ] HTTP fetcher (static/server-rendered pages, no browser needed)
-- [ ] Per-watcher retry/backoff with failure alerting
-- [ ] Session-based authentication (save/replay Playwright session)
