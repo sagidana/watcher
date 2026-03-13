@@ -12,6 +12,8 @@ import contextlib
 import html as _html
 import logging
 import secrets
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -325,6 +327,48 @@ async def _edit_to_actions(query: CallbackQuery, w: wc.WatcherConfig, note: str 
     await query.message.edit_text(text, reply_markup=_actions_kb(w), parse_mode="HTML")  # type: ignore[union-attr]
 
 
+async def _convert_via_libreoffice(pdf_path: Path, tmp: str) -> Path:
+    """Run LibreOffice headless conversion and return the .docx path."""
+    log.debug("pdf2doc libreoffice: starting conversion input=%s outdir=%s", pdf_path, tmp)
+    proc = await asyncio.create_subprocess_exec(
+        "libreoffice", "--headless", "--convert-to", "docx",
+        "--outdir", tmp, str(pdf_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    log.debug("pdf2doc libreoffice: returncode=%d stderr=%s", proc.returncode, stderr.decode().strip())
+    if proc.returncode != 0:
+        raise RuntimeError(stderr.decode())
+    matches = list(Path(tmp).glob("*.docx"))
+    log.debug("pdf2doc libreoffice: output files found=%s", [m.name for m in matches])
+    if not matches:
+        raise RuntimeError("LibreOffice produced no output file.")
+    log.debug("pdf2doc libreoffice: done output=%s", matches[0])
+    return matches[0]
+
+
+def _convert_via_pdf2docx(pdf_path: Path) -> Path:
+    """Convert using the pdf2docx library (fallback when LibreOffice is absent)."""
+    try:
+        from pdf2docx import Converter  # type: ignore[import]
+    except ImportError:
+        raise RuntimeError(
+            "Neither LibreOffice nor pdf2docx is available. "
+            "Install LibreOffice for best results."
+        )
+    docx_path = pdf_path.with_suffix(".docx")
+    log.debug("pdf2doc pdf2docx: starting conversion input=%s output=%s", pdf_path, docx_path)
+    cv = Converter(str(pdf_path))
+    cv.convert(str(docx_path))
+    cv.close()
+    log.debug("pdf2doc pdf2docx: conversion finished exists=%s", docx_path.exists())
+    if not docx_path.exists():
+        raise RuntimeError("pdf2docx produced no output file.")
+    log.debug("pdf2doc pdf2docx: done output=%s", docx_path)
+    return docx_path
+
+
 def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
     dp = Dispatcher()
     dp.update.outer_middleware(_ChatGuard(chat_id))
@@ -353,6 +397,7 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             "/status    — service status\n"
             "/watchers  — manage watchers\n"
             "/clipboard — set clipboard\n"
+            "/pdf2doc   — convert PDF → DOCX\n"
             "/help      — this message"
         )
 
@@ -382,6 +427,15 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             reply_markup=_watchers_list_kb(watchers),
             parse_mode="HTML",
         )
+
+    # ── PDF → DOCX conversion ──────────────────────────────────────────────────
+
+    @dp.message(Command("pdf2doc"))
+    async def cmd_pdf2doc(message: Message) -> None:
+        log.info("cmd=pdf2doc chat_id=%d", message.chat.id)
+        _pending.pop(message.chat.id, None)
+        ask = await message.answer("Send me a PDF file to convert to DOCX:")
+        _pending[message.chat.id] = {"action": "pdf2doc", "ask_msg_id": ask.message_id}
 
     # ── Files ──────────────────────────────────────────────────────────────────
 
@@ -435,6 +489,35 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
 
     @dp.message(F.photo | F.document)
     async def handle_file(message: Message, bot: Bot) -> None:
+        pending = _pending.get(message.chat.id)
+
+        # ── pdf2doc conversion ────────────────────────────────────────────────
+        if pending and pending.get("action") == "pdf2doc" and message.document:
+            doc = message.document
+            if doc.mime_type != "application/pdf":
+                await message.answer("❌ That's not a PDF. Please send a .pdf file:")
+                return
+            _pending.pop(message.chat.id, None)
+            progress = await message.answer("Converting… ⏳")
+            with tempfile.TemporaryDirectory() as tmp:
+                pdf_path = Path(tmp) / (doc.file_name or "input.pdf")
+                await bot.download(doc.file_id, destination=pdf_path)
+                try:
+                    if shutil.which("libreoffice"):
+                        docx_path = await _convert_via_libreoffice(pdf_path, tmp)
+                    else:
+                        docx_path = _convert_via_pdf2docx(pdf_path)
+                except RuntimeError as exc:
+                    await progress.edit_text(
+                        f"❌ Conversion failed:\n<code>{_html.escape(str(exc))}</code>",
+                        parse_mode="HTML",
+                    )
+                    return
+                await progress.edit_text("✅ Done")
+                await bot.send_document(message.chat.id, FSInputFile(docx_path))
+            return
+
+        # ── existing file-save logic ──────────────────────────────────────────
         _FILES_DIR.mkdir(parents=True, exist_ok=True)
 
         if message.photo:
@@ -1020,6 +1103,7 @@ _BOT_COMMANDS = [
     BotCommand(command="watchers",  description="Watchers"),
     BotCommand(command="files",     description="Files"),
     BotCommand(command="clipboard", description="Clipboard"),
+    BotCommand(command="pdf2doc",   description="Convert PDF → DOCX"),
     BotCommand(command="status",    description="Status"),
     BotCommand(command="help",      description="Help"),
     BotCommand(command="start",     description="Start"),

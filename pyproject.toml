@@ -31,6 +31,9 @@ dependencies = [
 
     # CLI output
     "rich>=13.0",
+
+    # PDF → DOCX fallback (used when LibreOffice is not installed)
+    "pdf2docx>=0.5",
 ]
 
 [project.scripts]
