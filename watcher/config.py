@@ -44,6 +44,8 @@ def load_settings() -> Settings:
 
     poll_timeout = 30
     log_level = "INFO"
+    # Headed by default when running from CLI; systemd always sets INVOCATION_ID.
+    headed = "INVOCATION_ID" not in os.environ
     settings_file = CONFIG_DIR / "settings.yaml"
     if settings_file.exists():
         raw = yaml.safe_load(settings_file.read_text()) or {}
@@ -52,6 +54,9 @@ def load_settings() -> Settings:
         )
         poll_timeout = max(1, min(55, poll_timeout))  # Telegram hard limits
         log_level = str(raw.get("log_level", log_level)).upper()
+        # settings.yaml can override auto-detection: headed: true/false
+        if "headed" in raw:
+            headed = bool(raw["headed"])
 
     return Settings(
         telegram=TelegramSettings(
@@ -60,4 +65,5 @@ def load_settings() -> Settings:
             poll_timeout=poll_timeout,
         ),
         log_level=log_level,
+        headed=headed,
     )

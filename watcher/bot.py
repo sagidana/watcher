@@ -211,6 +211,7 @@ def _actions_kb(w: wc.WatcherConfig) -> InlineKeyboardMarkup:
     toggle = "🔴 Disable" if w.enabled else "🟢 Enable"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚡ Fetch Now",      callback_data=f"w:fetch_now:{w.id}")],
+        [InlineKeyboardButton(text="📋 Get Snapshot",   callback_data=f"w:get_snapshot:{w.id}")],
         [InlineKeyboardButton(text=toggle,              callback_data=f"w:toggle:{w.id}")],
         [InlineKeyboardButton(text="✏️ Rename",         callback_data=f"w:rename:{w.id}")],
         [InlineKeyboardButton(text="⏱  Set Interval",  callback_data=f"w:interval:{w.id}")],
@@ -438,6 +439,34 @@ def _convert_via_pymupdf(pdf_path: Path) -> Path:
     return docx_path
 
 
+async def _convert_via_online(pdf_path: Path, tmp: str, *, headed: bool = False) -> Path:
+    """Convert PDF→DOCX using ilovepdf.com via Playwright (best for Hebrew/RTL)."""
+    from playwright.async_api import async_playwright
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=not headed)
+        context = await browser.new_context(accept_downloads=True)
+        page = await context.new_page()
+        try:
+            log.debug("pdf2doc: online: navigating to ilovepdf")
+            await page.goto("https://www.ilovepdf.com/pdf_to_word", timeout=30_000)
+
+            # Selecting the file triggers auto-upload+conversion, redirects to /download/...,
+            # then the page auto-fires the file download — no button click required.
+            log.debug("pdf2doc: online: selecting file (triggers auto-upload+convert+download)")
+            async with page.expect_download(timeout=180_000) as dl_info:
+                await page.set_input_files("input[type='file']", str(pdf_path))
+            log.debug("pdf2doc: online: download captured")
+            download = await dl_info.value
+            if download.failure():
+                raise RuntimeError(f"download failed: {download.failure()}")
+            out = Path(tmp) / (download.suggested_filename or "converted.docx")
+            await download.save_as(str(out))
+            log.debug("pdf2doc: online: done output=%s", out)
+            return out
+        finally:
+            await browser.close()
+
+
 def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
     dp = Dispatcher()
     dp.update.outer_middleware(_ChatGuard(chat_id))
@@ -574,16 +603,21 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
                 original_stem = Path(doc.file_name or "output").stem
                 await bot.download(doc.file_id, destination=pdf_path)
                 try:
-                    if shutil.which("libreoffice"):
-                        try:
-                            docx_path = await _convert_via_libreoffice(pdf_path, tmp)
-                            if _docx_text_seems_garbled(docx_path):
-                                log.debug("pdf2doc: libreoffice output garbled, falling back to pymupdf")
-                                docx_path = _convert_via_pymupdf(pdf_path)
-                        except:
-                            docx_path = _convert_via_pdf2docx(pdf_path)
-                    else:
-                        docx_path = _convert_via_pdf2docx(pdf_path)
+                    docx_path = await _convert_via_online(pdf_path, tmp, headed=settings.headed)
+                    # try:
+                        # docx_path = await _convert_via_online(pdf_path, tmp, headed=settings.headed)
+                    # except Exception as exc:
+                        # log.warning("pdf2doc: online conversion failed (%s), falling back to LibreOffice", exc)
+                        # if shutil.which("libreoffice"):
+                            # try:
+                                # docx_path = await _convert_via_libreoffice(pdf_path, tmp)
+                                # if _docx_text_seems_garbled(docx_path):
+                                    # log.debug("pdf2doc: libreoffice output garbled, trying pymupdf")
+                                    # docx_path = _convert_via_pymupdf(pdf_path)
+                            # except Exception:
+                                # docx_path = _convert_via_pdf2docx(pdf_path)
+                        # else:
+                            # docx_path = _convert_via_pdf2docx(pdf_path)
                 except RuntimeError as exc:
                     await progress.edit_text(
                         f"❌ Conversion failed:\n<code>{_html.escape(str(exc))}</code>",
@@ -725,6 +759,27 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             "error":   "❌ Fetch failed — see logs.",
         }
         await _edit_to_actions(query, w, notes.get(status, status))
+
+    @dp.callback_query(F.data.startswith("w:get_snapshot:"))
+    async def cb_get_snapshot(query: CallbackQuery, bot: Bot) -> None:
+        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
+        w = wc.get(wid)
+        if w is None:
+            await query.answer("Watcher not found.", show_alert=True)
+            return
+        _, text = engine._get_snapshot(wid)
+        if text is None:
+            await query.answer("No snapshot yet.", show_alert=True)
+            return
+        await query.answer()
+        chat_id = query.message.chat.id  # type: ignore[union-attr]
+        header = f"📋 <b>Snapshot: {_html.escape(w.name)}</b>\n\n"
+        # Telegram message limit is 4096 chars; send as file if too large.
+        MAX_MSG = 4000
+        truncated = len(text) > MAX_MSG
+        body = _html.escape(text[:MAX_MSG])
+        suffix = f"\n…<i>(truncated, {len(text)} chars total)</i>" if truncated else ""
+        await bot.send_message(chat_id, header + body + suffix, parse_mode="HTML")
 
     @dp.callback_query(F.data.startswith("w:delete:"))
     async def cb_delete(query: CallbackQuery) -> None:
