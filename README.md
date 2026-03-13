@@ -15,6 +15,7 @@ to you via Telegram when something changes.
 - [How It Works](#how-it-works)
   - [Fetcher](#fetcher)
   - [Change Detection](#change-detection)
+  - [AI Filtering](#ai-filtering)
   - [Captcha Strategy](#captcha-strategy)
 - [Telegram Bot](#telegram-bot)
 - [CLI Reference](#cli-reference)
@@ -41,12 +42,6 @@ to you via Telegram when something changes.
 │  │ /status     │                                     │
 │  │ /help       │                                     │
 │  └─────────────┘                                     │
-│                                                      │
-│  ┌─────────────────────────────────────────────────┐ │
-│  │  SQLite (state.db)                              │ │
-│  │  - last-seen hashes per watcher                │ │
-│  │  - run history & error log                     │ │
-│  └─────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────┘
          │
          │ runs as
@@ -67,20 +62,18 @@ enabled watcher. The Telegram bot runs concurrently in the same loop.
 ~/.config/watcher/             # all runtime config and data
 ├── .env                       # TELEGRAM_TOKEN, TELEGRAM_CHAT_ID (written by installer)
 ├── settings.yaml              # service settings (e.g. Telegram poll_timeout)
-├── watchers/                  # one YAML file per watcher
-│   └── <8hex-id>.yaml
-├── state.db                   # SQLite: hashes, run history
-└── sessions/                  # saved Playwright browser session files
+└── watchers/                  # one YAML file per watcher + one snapshot file per watcher
+    ├── <8hex-id>.yaml
+    └── <8hex-id>.snapshot     # last-seen hash + content (plain text, no DB)
 
 watcher/                       # source tree (installed package)
 ├── watcher/                   # core Python package
 │   ├── __init__.py
 │   ├── main.py                # entrypoint: wires engine + bot, starts loop
-│   ├── cli.py                 # `watcher` CLI (install, uninstall, run, watch…)
+│   ├── cli.py                 # `watcher` CLI (install, uninstall, run, reload…)
 │   ├── engine.py              # asyncio task manager; one task per watcher
-│   ├── bot.py                 # Telegram bot: /start /status /help
+│   ├── bot.py                 # Telegram bot: commands + inline keyboard UI
 │   ├── notifier.py            # Telegram send helpers (unified-diff messages)
-│   ├── picker.py              # headed-browser element picker (watcher watch)
 │   ├── watchers_config.py     # YAML CRUD for per-watcher config files
 │   ├── config.py              # loads .env + settings.yaml into Settings dataclass
 │   ├── data/
@@ -126,8 +119,7 @@ watcher install
    - Sends a test message to confirm everything works
    - Writes `~/.config/watcher/.env` (mode `0600`)
 3. Runs `playwright install chromium`
-4. Initialises the SQLite database at `~/.config/watcher/state.db`
-5. Writes a `systemd --user` unit file and runs `systemctl --user enable --now watcher`
+4. Writes a `systemd --user` unit file and runs `systemctl --user enable --now watcher`
 
 Logs are written to `/tmp/watcher.log`.
 
@@ -144,19 +136,23 @@ Stops and disables the service and removes the systemd unit file. Your data at
 
 ## Adding Watchers
 
-Use the visual browser picker:
+Create a YAML file in `~/.config/watcher/watchers/`:
 
 ```bash
-watcher watch
+cat > ~/.config/watcher/watchers/mysite.yaml <<EOF
+id: mysite
+name: "My site price"
+url: https://example.com/product
+selector: "span.price"
+interval: 60
+enabled: true
+created_at: "2026-01-01T00:00:00+00:00"
+EOF
 ```
 
-This opens a headed Chromium window with a floating toolbar injected into every
-page. Navigate to the site you want to monitor, click **Pick Element**, hover
-to highlight elements, then click to select. A Confirm / Re-pick dialog lets
-you review the generated CSS selector before saving.
+The running service picks it up within 10 seconds — no restart needed.
 
-The watcher is written to `~/.config/watcher/watchers/<id>.yaml` and the
-running service picks it up within 10 seconds — no restart needed.
+You can also manage watchers interactively via the **Telegram bot** (see below).
 
 ---
 
@@ -172,11 +168,14 @@ selector: "div.price"
 interval: 30          # seconds between checks
 enabled: true
 created_at: "2026-01-01T00:00:00+00:00"
+prompts:              # optional: chain of cai filter prompts
+  - "Only pass through price changes. Return empty if nothing relevant."
 ```
 
-Each watcher lives in its own file. Edit the file and the engine will pick up
-changes on its next rescan (within 10 s). Set `enabled: false` to pause a
-watcher without deleting it.
+Each watcher lives in its own file. Edit it and the engine picks up changes on
+the next rescan (within 10 s). Set `enabled: false` to pause without deleting.
+
+Snapshots are stored alongside the YAML as `<id>.snapshot` — no database needed.
 
 ### Service settings (`~/.config/watcher/settings.yaml`)
 
@@ -191,9 +190,9 @@ telegram:
 
 ### Fetcher
 
-All watchers currently use the **browser fetcher** (headless Chromium via
-Playwright with `playwright-stealth`). One persistent browser context is kept
-alive per watcher to avoid spawn overhead on every poll cycle.
+All watchers use the **browser fetcher** (headless Chromium via Playwright with
+`playwright-stealth`). One persistent browser context is kept alive per watcher
+to avoid spawn overhead on every poll cycle.
 
 The fetcher:
 1. Navigates to the URL (with `networkidle` timeout, falling back to `domcontentloaded`)
@@ -204,10 +203,17 @@ The fetcher:
 
 1. Fetch and normalise the target element's text
 2. SHA-256 hash the result
-3. Compare against the hash stored in `state.db`
-4. If different: save the new hash + snapshot, send a Telegram notification
-   with an added/removed unified-diff summary, and record a `changed` run
-5. If unchanged: record an `ok` run
+3. Compare against the hash stored in `~/.config/watcher/watchers/<id>.snapshot`
+4. If different: save the new snapshot, build a unified-diff summary, and send a Telegram notification
+5. If unchanged: sleep until the next interval
+
+### AI Filtering
+
+Each watcher can define a `prompts` list. When a change is detected the diff is
+passed through the prompts in order using `cai`. Each prompt can filter,
+summarise, or rewrite the diff before it reaches the next step. If any prompt
+returns empty the notification is suppressed — useful for ignoring irrelevant
+updates (ads, timestamps, etc.).
 
 ### Captcha Strategy
 
@@ -215,7 +221,7 @@ The fetcher:
    headless flags, user-agent). Bypasses Cloudflare JS challenges passively.
 2. **Residential IP advantage** — running on your home machine means your IP
    is a clean residential address.
-3. **Graceful failure** — errors are logged and recorded in the run history.
+3. **Graceful failure** — errors are logged; the task retries on the next interval.
 
 ---
 
@@ -224,26 +230,35 @@ The fetcher:
 The bot runs inside the same process as the watcher service and only responds
 to messages from your configured `TELEGRAM_CHAT_ID`.
 
-Currently implemented commands:
+### Commands
 
-| Command    | Description                          |
-|------------|--------------------------------------|
-| `/start`   | Greeting and command list            |
-| `/status`  | Confirms the service is running      |
-| `/help`    | Shows available commands             |
+| Command      | Description                              |
+|--------------|------------------------------------------|
+| `/start`     | Greeting and command list                |
+| `/status`    | Confirms the service is running          |
+| `/help`      | Shows available commands                 |
+| `/watchers`  | List all watchers with inline actions    |
+| `/files`     | Browse and manage session files          |
+| `/clipboard` | Copy text to the host clipboard          |
+
+### Inline watcher management
+
+From `/watchers` you can: enable/disable, rename, change interval, edit
+prompts, trigger an immediate fetch, or delete any watcher — all without
+touching the YAML files directly.
 
 ---
 
 ## CLI Reference
 
-| Command            | Description                                          |
-|--------------------|------------------------------------------------------|
-| `watcher install`  | Interactive install: Telegram setup + systemd service |
-| `watcher uninstall`| Stop, disable, and remove the service               |
-| `watcher status`   | Show `systemctl --user status watcher`              |
-| `watcher run`      | Run in the foreground (development mode)            |
-| `watcher watch`    | Open headed browser picker to add a new watcher     |
-| `watcher reload`   | `systemctl --user reload-or-restart watcher`        |
+| Command              | Description                                           |
+|----------------------|-------------------------------------------------------|
+| `watcher install`    | Interactive install: Telegram setup + systemd service |
+| `watcher uninstall`  | Stop, disable, and remove the service                 |
+| `watcher status`     | Show `systemctl --user status watcher`                |
+| `watcher run`        | Run in the foreground (development mode)              |
+| `watcher reload`     | `systemctl --user reload-or-restart watcher`          |
+| `watcher message`    | Send a Telegram message or file to your chat          |
 
 ---
 
@@ -253,19 +268,16 @@ Currently implemented commands:
 - [x] Project structure, pyproject.toml, CLI skeleton
 - [x] `watcher install` / `uninstall` with interactive Telegram wizard
 - [x] systemd user service setup and management
-- [x] SQLite schema (watchers, snapshots, runs)
 - [x] Browser fetcher (Playwright + stealth, persistent context per watcher)
+- [x] File-based snapshot storage (`<id>.snapshot`, no database)
 - [x] Diff engine (SHA-256 hash + unified-diff notification)
-- [x] Telegram notifier (MarkdownV2 added/removed summary)
+- [x] Telegram notifier (HTML formatted added/removed summary)
 - [x] Monitoring engine (dynamic asyncio task per watcher, 10 s rescan)
-- [x] Interactive element picker (`watcher watch`)
-- [x] Basic Telegram bot (`/start`, `/status`, `/help`)
+- [x] Telegram bot with inline keyboard watcher management
+- [x] AI filter chain (`cai` prompt pipeline per watcher)
 
 ### Planned
-- [ ] RSS fetcher (Tier 1 — prefer when available)
-- [ ] HTTP fetcher (Tier 2 — static/server-rendered pages)
-- [ ] Advanced bot commands: `/list`, `/pause`, `/resume`, `/check`, `/remove`, `/logs`
+- [ ] RSS fetcher (prefer when available)
+- [ ] HTTP fetcher (static/server-rendered pages, no browser needed)
 - [ ] Per-watcher retry/backoff with failure alerting
 - [ ] Session-based authentication (save/replay Playwright session)
-- [ ] CAPTCHA solver integration (2captcha / CapSolver)
-- [ ] `watcher status` with rich terminal dashboard

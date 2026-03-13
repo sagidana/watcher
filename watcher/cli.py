@@ -44,10 +44,6 @@ def _setup_logging() -> None:
     )
 
 
-def _working_dir() -> Path:
-    """Absolute path to the project root (where the package is installed from)."""
-    return Path(__file__).resolve().parent.parent
-
 
 def _python_bin() -> str:
     """Path to the Python interpreter running this process."""
@@ -254,21 +250,9 @@ def _setup_telegram() -> None:
 
 
 def _ensure_config_dir() -> None:
-    """Create ~/.config/watcher and seed watchers.yaml if missing."""
+    """Create ~/.config/watcher/ directory structure if missing."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    (CONFIG_DIR / "sessions").mkdir(exist_ok=True)
-
-    yaml_dest = CONFIG_DIR / "watchers.yaml"
-    if not yaml_dest.exists():
-        yaml_src = _working_dir() / "config" / "watchers.yaml"
-        if yaml_src.exists():
-            yaml_dest.write_text(yaml_src.read_text())
-            console.print(
-                f"[green]✓[/green] Created [cyan]{yaml_dest}[/cyan] from example"
-            )
-        else:
-            yaml_dest.write_text("watchers: []\n")
-            console.print(f"[green]✓[/green] Created empty [cyan]{yaml_dest}[/cyan]")
+    (CONFIG_DIR / "watchers").mkdir(exist_ok=True)
 
     settings_dest = CONFIG_DIR / "settings.yaml"
     if not settings_dest.exists():
@@ -329,12 +313,7 @@ def cmd_install(_args: argparse.Namespace) -> None:
         sys.exit(1)
     console.print("[green]✓[/green] Playwright Chromium installed")
 
-    # 5. Initialise database
-    console.print("\n[bold]Initialising database...[/bold]")
-    _init_db()
-    console.print("[green]✓[/green] Database initialised")
-
-    # 6. Write systemd unit
+    # 5. Write systemd unit
     console.print("\n[bold]Registering systemd service...[/bold]")
     _write_unit_file()
 
@@ -491,13 +470,6 @@ def cmd_message(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         console.print(f"[green]✓[/green] File sent: [cyan]{file_path.name}[/cyan]")
-
-
-def _init_db() -> None:
-    """Create config dir structure."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    (CONFIG_DIR / "sessions").mkdir(exist_ok=True)
-    (CONFIG_DIR / "watchers").mkdir(exist_ok=True)
 
 
 def main() -> None:
