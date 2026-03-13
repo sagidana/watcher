@@ -12,6 +12,41 @@ import re
 
 log = logging.getLogger("watcher.fetcher.browser")
 
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+# Extracts visible text nodes by walking the DOM in-browser (single IPC call).
+_EXTRACT_JS = """
+() => {
+    const texts = [];
+    const walker = document.createTreeWalker(
+        document.body,
+        NodeFilter.SHOW_TEXT,
+        {
+            acceptNode(node) {
+                let el = node.parentElement;
+                while (el) {
+                    const s = window.getComputedStyle(el);
+                    if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
+                        return NodeFilter.FILTER_REJECT;
+                    el = el.parentElement;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        }
+    );
+    let node;
+    while ((node = walker.nextNode())) {
+        const t = node.textContent.trim();
+        if (t) texts.push(t);
+    }
+    return texts.join('\\n');
+}
+"""
+
 
 class BrowserFetcher:
     """
@@ -32,117 +67,78 @@ class BrowserFetcher:
         from playwright.async_api import async_playwright
 
         self._url = url
-
         self._playwright = await async_playwright().start()
-
         self._browser = await self._playwright.chromium.launch(headless=True)
-        self._context = await self._browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        )
+        self._context = await self._browser.new_context(user_agent=_USER_AGENT)
+        self._page = await self._context.new_page()
+
         try:
             from playwright_stealth import stealth_async  # type: ignore
-            self._page = await self._context.new_page()
             await stealth_async(self._page)
         except ImportError:
-            self._page = await self._context.new_page()
+            pass
 
-        await self._navigate()
+        await self._goto(self._url)
 
-    async def _navigate(self) -> None:
+    async def _goto(self, url: str) -> None:
+        """Navigate to url, falling back to domcontentloaded if networkidle times out."""
         assert self._page is not None
         try:
-            await self._page.goto(self._url, wait_until="networkidle", timeout=30_000)
+            await self._page.goto(url, wait_until="networkidle", timeout=30_000)
+            return
         except Exception:
-            # Fallback: domcontentloaded is faster and more reliable for heavy SPAs
-            try:
-                await self._page.goto(self._url, wait_until="domcontentloaded", timeout=20_000)
-            except Exception as exc:
-                log.warning("Navigation fallback also failed: %s", exc)
-                raise
+            pass
+
+        try:
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        except Exception as exc:
+            log.warning("_goto [%s]: both navigation strategies failed: %s", url, exc)
+            raise
+
+    async def _reload(self) -> None:
+        """Reload the current page, falling back to domcontentloaded if networkidle times out."""
+        assert self._page is not None
+        try:
+            await self._page.reload(wait_until="networkidle", timeout=30_000)
+            return
+        except Exception:
+            pass
+
+        await self._page.reload(wait_until="domcontentloaded", timeout=20_000)
 
     async def fetch(self) -> str:
         """Reload the page and return visible text content (normalised)."""
         assert self._page is not None
 
         try:
-            await self._page.reload(wait_until="networkidle", timeout=30_000)
-        except Exception:
+            await self._reload()
+        except Exception as exc:
+            log.warning("fetch [%s]: reload failed (%s), attempting browser restart", self._url, exc)
             try:
-                await self._page.reload(wait_until="domcontentloaded", timeout=20_000)
-            except Exception as exc:
-                # Browser/page was closed (crash, OOM, etc.) — attempt full restart
-                log.warning("fetch [%s]: reload failed (%s), attempting browser restart", self._url, exc)
-                try:
-                    await self.close()
-                    await self.start(self._url)
-                except Exception as restart_exc:
-                    log.error("fetch [%s]: browser restart failed: %s", self._url, restart_exc)
-                    return ""
+                await self.close()
+                await self.start(self._url)
+            except Exception as restart_exc:
+                log.error("fetch [%s]: browser restart failed: %s", self._url, restart_exc)
+                return ""
 
         try:
-            content: str = await self._page.evaluate(
-                """
-                () => {
-                    const texts = [];
-                    const walker = document.createTreeWalker(
-                        document.body,
-                        NodeFilter.SHOW_TEXT,
-                        {
-                            acceptNode(node) {
-                                let el = node.parentElement;
-                                while (el) {
-                                    const s = window.getComputedStyle(el);
-                                    if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
-                                        return NodeFilter.FILTER_REJECT;
-                                    el = el.parentElement;
-                                }
-                                return NodeFilter.FILTER_ACCEPT;
-                            }
-                        }
-                    );
-                    let node;
-                    while ((node = walker.nextNode())) {
-                        const t = node.textContent.trim();
-                        if (t) texts.push(t);
-                    }
-                    return texts.join('\\n');
-                }
-                """,
-                None,
-            )
-            log.debug(
-                "[browser] extracted %d chars from %s",
-                len(content), self._url,
-            )
+            content: str = await self._page.evaluate(_EXTRACT_JS, None)
+            log.debug("[browser] extracted %d chars from %s", len(content), self._url)
             return _normalise(content)
-        except Exception as e:
-            log.info(f"[browser] ({self._url}): exception {e}")
-
-        return ""
-
+        except Exception:
+            log.exception("[browser] extraction failed (%s)", self._url)
+            return ""
 
     async def close(self) -> None:
         try:
             if self._page:
-                log.info("[browser] closing page...")
                 await self._page.close()
-                log.info("[browser] page closed")
             if self._context:
-                log.info("[browser] closing context...")
                 await self._context.close()
-                log.info("[browser] context closed")
             if self._browser:
-                log.info("[browser] closing browser...")
                 await self._browser.close()
-                log.info("[browser] browser closed")
             if self._playwright:
-                log.info("[browser] stopping playwright...")
                 await self._playwright.stop()
-                log.info("[browser] playwright stopped")
         except Exception:
             log.exception("[browser] error during close")
         finally:
@@ -152,6 +148,6 @@ class BrowserFetcher:
 def _normalise(text: str) -> str:
     """Strip and collapse internal whitespace."""
     text = text.strip()
-    text = re.sub(r"[ \t]+", " ", text)       # collapse horizontal whitespace
-    text = re.sub(r"\n{3,}", "\n\n", text)    # collapse blank lines
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text
