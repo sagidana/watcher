@@ -30,6 +30,7 @@ from aiogram.types import (
 )
 
 from .config import Settings
+from . import engine
 from . import watchers_config as wc
 
 # ── clipboard helpers ────────────────────────────────────────────────────────
@@ -206,11 +207,12 @@ def _unit_sel_new_kb() -> InlineKeyboardMarkup:
 def _actions_kb(w: wc.WatcherConfig) -> InlineKeyboardMarkup:
     toggle = "🔴 Disable" if w.enabled else "🟢 Enable"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=toggle,         callback_data=f"w:toggle:{w.id}")],
-        [InlineKeyboardButton(text="✏️ Rename",    callback_data=f"w:rename:{w.id}")],
+        [InlineKeyboardButton(text="⚡ Fetch Now",      callback_data=f"w:fetch_now:{w.id}")],
+        [InlineKeyboardButton(text=toggle,              callback_data=f"w:toggle:{w.id}")],
+        [InlineKeyboardButton(text="✏️ Rename",         callback_data=f"w:rename:{w.id}")],
         [InlineKeyboardButton(text="⏱  Set Interval",  callback_data=f"w:interval:{w.id}")],
-        [InlineKeyboardButton(text="📝 Prompts",   callback_data=f"w:prompts:{w.id}")],
-        [InlineKeyboardButton(text="🗑 Delete",    callback_data=f"w:delete:{w.id}")],
+        [InlineKeyboardButton(text="📝 Prompts",        callback_data=f"w:prompts:{w.id}")],
+        [InlineKeyboardButton(text="🗑 Delete",         callback_data=f"w:delete:{w.id}")],
         [InlineKeyboardButton(text="◀ Back",  callback_data="w:list"),
          _done_btn()],
     ])
@@ -317,7 +319,13 @@ class _ChatGuard(BaseMiddleware):
         return await handler(event, data)
 
 
-def _build_dispatcher(chat_id: int) -> Dispatcher:
+async def _edit_to_actions(query: CallbackQuery, w: wc.WatcherConfig, note: str = "") -> None:
+    """Edit the current message to the watcher actions view, with an optional status note."""
+    text = _watcher_info_text(w) + (f"\n{note}" if note else "")
+    await query.message.edit_text(text, reply_markup=_actions_kb(w), parse_mode="HTML")  # type: ignore[union-attr]
+
+
+def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
     dp = Dispatcher()
     dp.update.outer_middleware(_ChatGuard(chat_id))
 
@@ -519,11 +527,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             for mid in ui.get("prompt_msg_ids", []):
                 with contextlib.suppress(Exception):
                     await bot.delete_message(chat_id, mid)
-        await query.message.edit_text(  # type: ignore[union-attr]
-            _watcher_info_text(w),
-            reply_markup=_actions_kb(w),
-            parse_mode="HTML",
-        )
+        await _edit_to_actions(query, w)
         await query.answer()
 
     @dp.callback_query(F.data.startswith("w:toggle:"))
@@ -535,12 +539,29 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
             return
         w.enabled = not w.enabled
         wc.save(w)
+        await _edit_to_actions(query, w)
+        await query.answer("Enabled." if w.enabled else "Disabled.")
+
+    @dp.callback_query(F.data.startswith("w:fetch_now:"))
+    async def cb_fetch_now(query: CallbackQuery) -> None:
+        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
+        w = wc.get(wid)
+        if w is None:
+            await query.answer("Watcher not found.", show_alert=True)
+            return
+        await query.answer("⚡ Fetching…")
         await query.message.edit_text(  # type: ignore[union-attr]
-            _watcher_info_text(w),
-            reply_markup=_actions_kb(w),
+            f"{_watcher_info_text(w)}\n⏳ Fetching…",
             parse_mode="HTML",
         )
-        await query.answer("Enabled." if w.enabled else "Disabled.")
+        status = await engine.fetch_once(settings, w)
+        w = wc.get(wid) or w
+        notes = {
+            "changed": "✅ Change detected — notification sent.",
+            "ok":      "✅ No change.",
+            "error":   "❌ Fetch failed — see logs.",
+        }
+        await _edit_to_actions(query, w, notes.get(status, status))
 
     @dp.callback_query(F.data.startswith("w:delete:"))
     async def cb_delete(query: CallbackQuery) -> None:
@@ -1008,7 +1029,7 @@ _BOT_COMMANDS = [
 async def run_bot(settings: Settings) -> None:
     """Start the bot and block until cancelled."""
     bot = Bot(token=settings.telegram.token)
-    dp = _build_dispatcher(settings.telegram.chat_id)
+    dp = _build_dispatcher(settings.telegram.chat_id, settings)
 
     await bot.set_my_commands(_BOT_COMMANDS)
     log.info("bot commands registered: %s", [c.command for c in _BOT_COMMANDS])

@@ -195,6 +195,33 @@ async def _poll_once(
     return h, text, True
 
 
+async def fetch_once(settings: Settings, watcher: WatcherConfig) -> str:
+    """
+    One-shot fetch outside the regular poll loop.
+
+    Creates a temporary BrowserFetcher, runs _poll_once (which will notify if
+    content changed), persists the new snapshot and records the run.
+    Returns "changed", "ok", or "error".
+    """
+    fetcher = BrowserFetcher()
+    try:
+        await fetcher.start(watcher.url)
+        last_hash, last_text = await _get_snapshot(watcher.id)
+        new_hash, new_text, changed = await _poll_once(
+            settings, watcher, fetcher, last_hash, last_text
+        )
+        await _save_snapshot(watcher.id, new_hash, new_text)
+        status = "changed" if changed else "ok"
+        await _record_run(watcher.id, status)
+        return status
+    except Exception:
+        log.exception("[watch:%s] fetch_once failed", watcher.id)
+        await _record_run(watcher.id, "error", "fetch_once failed")
+        return "error"
+    finally:
+        await fetcher.close()
+
+
 async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
     log.info("[watch:%s] task started", watcher.id)
     fetcher = BrowserFetcher()
