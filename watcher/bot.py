@@ -13,17 +13,20 @@ import html as _html
 import logging
 import secrets
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
     ReplyKeyboardRemove,
+    Update,
 )
 
 from .config import Settings
@@ -73,6 +76,36 @@ _pending: dict[int, dict] = {}
 # Tracks the per-prompt messages currently shown so they can be cleaned up.
 
 _prompts_ui: dict[int, dict] = {}
+
+
+# ── files storage ───────────────────────────────────────────────────────────────
+
+_FILES_DIR = Path.home() / ".config" / "watcher" / "files"
+
+
+def _saved_files() -> list[Path]:
+    if not _FILES_DIR.exists():
+        return []
+    return sorted(f for f in _FILES_DIR.iterdir() if f.is_file())
+
+
+def _files_list_text(files: list[Path]) -> str:
+    if not files:
+        return "📁 <b>Files</b>\n\nNo files saved yet.\nSend any photo or document here to save it."
+    n = len(files)
+    return f"📁 <b>Files</b>  <i>({n} file{'s' if n != 1 else ''})</i>"
+
+
+def _files_list_kb(files: list[Path]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text=f"📄  {f.name}", callback_data=f"f:resend:{i}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"f:del:{i}"),
+        ]
+        for i, f in enumerate(files)
+    ]
+    rows.append([_done_btn()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ── interval unit helpers ──────────────────────────────────────────────────────
@@ -259,10 +292,34 @@ def _watcher_info_text(w: wc.WatcherConfig) -> str:
 
 # ── dispatcher ─────────────────────────────────────────────────────────────────
 
+class _ChatGuard(BaseMiddleware):
+    """Outer middleware — silently drops every update not from the configured chat."""
+
+    def __init__(self, allowed_chat_id: int) -> None:
+        self._allowed = allowed_chat_id
+
+    async def __call__(self, handler, event: Update, data: dict):  # type: ignore[override]
+        chat_id: int | None = None
+        if event.message:
+            chat_id = event.message.chat.id
+        elif event.callback_query and event.callback_query.message:
+            chat_id = event.callback_query.message.chat.id
+        elif event.edited_message:
+            chat_id = event.edited_message.chat.id
+        elif event.channel_post:
+            chat_id = event.channel_post.chat.id
+
+        if chat_id is None or chat_id != self._allowed:
+            if chat_id is not None:
+                log.warning("blocked update from unauthorized chat_id=%d", chat_id)
+            return
+
+        return await handler(event, data)
+
+
 def _build_dispatcher(chat_id: int) -> Dispatcher:
     dp = Dispatcher()
-    dp.message.filter(F.chat.id == chat_id)
-    dp.callback_query.filter(F.message.chat.id == chat_id)
+    dp.update.outer_middleware(_ChatGuard(chat_id))
 
     # ── Commands ───────────────────────────────────────────────────────────────
 
@@ -315,6 +372,82 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
         await message.answer(
             _watchers_list_text(watchers),
             reply_markup=_watchers_list_kb(watchers),
+            parse_mode="HTML",
+        )
+
+    # ── Files ──────────────────────────────────────────────────────────────────
+
+    @dp.message(Command("files"))
+    async def cmd_files(message: Message) -> None:
+        log.info("cmd=files chat_id=%d", message.chat.id)
+        _FILES_DIR.mkdir(parents=True, exist_ok=True)
+        files = _saved_files()
+        await message.answer(
+            _files_list_text(files),
+            reply_markup=_files_list_kb(files),
+            parse_mode="HTML",
+        )
+
+    @dp.callback_query(F.data == "f:list")
+    async def cb_files_list(query: CallbackQuery) -> None:
+        files = _saved_files()
+        await query.message.edit_text(  # type: ignore[union-attr]
+            _files_list_text(files),
+            reply_markup=_files_list_kb(files),
+            parse_mode="HTML",
+        )
+        await query.answer()
+
+    @dp.callback_query(F.data.startswith("f:del:"))
+    async def cb_file_delete(query: CallbackQuery) -> None:
+        idx = int(query.data.split(":", 2)[2])  # type: ignore[union-attr]
+        files = _saved_files()
+        if idx >= len(files):
+            await query.answer("File not found.", show_alert=True)
+            return
+        name = files[idx].name
+        files[idx].unlink()
+        await query.answer(f"🗑 {name} deleted.")
+        remaining = _saved_files()
+        await query.message.edit_text(  # type: ignore[union-attr]
+            _files_list_text(remaining),
+            reply_markup=_files_list_kb(remaining),
+            parse_mode="HTML",
+        )
+
+    @dp.callback_query(F.data.startswith("f:resend:"))
+    async def cb_file_resend(query: CallbackQuery, bot: Bot) -> None:
+        idx = int(query.data.split(":", 2)[2])  # type: ignore[union-attr]
+        files = _saved_files()
+        if idx >= len(files):
+            await query.answer("File not found.", show_alert=True)
+            return
+        await bot.send_document(query.message.chat.id, FSInputFile(files[idx]))  # type: ignore[union-attr]
+        await query.answer()
+
+    @dp.message(F.photo | F.document)
+    async def handle_file(message: Message, bot: Bot) -> None:
+        _FILES_DIR.mkdir(parents=True, exist_ok=True)
+
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filename = f"photo_{ts}.jpg"
+        else:
+            file_id = message.document.file_id  # type: ignore[union-attr]
+            filename = message.document.file_name or f"file_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"  # type: ignore[union-attr]
+
+        dest = _FILES_DIR / filename
+        if dest.exists():
+            stem, suffix, counter = dest.stem, dest.suffix, 1
+            while dest.exists():
+                dest = _FILES_DIR / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+        await bot.download(file_id, destination=dest)
+        log.info("file saved: %s", dest)
+        await message.answer(
+            f"✅ Saved as <code>{_html.escape(dest.name)}</code>",
             parse_mode="HTML",
         )
 
@@ -864,6 +997,7 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
 
 _BOT_COMMANDS = [
     BotCommand(command="watchers",  description="Watchers"),
+    BotCommand(command="files",     description="Files"),
     BotCommand(command="clipboard", description="Clipboard"),
     BotCommand(command="status",    description="Status"),
     BotCommand(command="help",      description="Help"),
