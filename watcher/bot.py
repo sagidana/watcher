@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import html as _html
 import logging
+import os
 import secrets
 import shutil
 import tempfile
@@ -333,15 +334,18 @@ async def _convert_via_libreoffice(pdf_path: Path, tmp: str) -> Path:
     # Each conversion gets its own LO profile dir to avoid lock contention
     profile_dir = Path(tmp) / "lo_profile"
     profile_dir.mkdir()
+    lo_env = {**os.environ, "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
     proc = await asyncio.create_subprocess_exec(
         "libreoffice",
         f"-env:UserInstallation=file://{profile_dir}",
         "--headless",
+        "--norestore",
         "--infilter=writer_pdf_import",
         "--convert-to", "docx:MS Word 2007 XML",
         "--outdir", tmp, str(pdf_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=lo_env,
     )
     stdout, stderr = await proc.communicate()
     log.debug(
@@ -376,6 +380,61 @@ def _convert_via_pdf2docx(pdf_path: Path) -> Path:
     if not docx_path.exists():
         raise RuntimeError("pdf2docx produced no output file.")
     log.debug("pdf2doc pdf2docx: done output=%s", docx_path)
+    return docx_path
+
+
+def _docx_text_seems_garbled(docx_path: Path) -> bool:
+    """Return True if the DOCX has no text or is dominated by replacement/private-use chars."""
+    try:
+        from docx import Document  # type: ignore[import]
+    except ImportError:
+        return False
+    text = "".join(p.text for p in Document(str(docx_path)).paragraphs)
+    if not text.strip():
+        log.debug("pdf2doc garble-check: no text found in output")
+        return True
+    # U+FFFD = replacement char; U+E000-U+F8FF = Private Use Area (raw glyph IDs leak here)
+    garbage = sum(1 for c in text if c == "\ufffd" or "\ue000" <= c <= "\uf8ff")
+    ratio = garbage / len(text)
+    log.debug("pdf2doc garble-check: garbage ratio=%.2f", ratio)
+    return ratio > 0.05
+
+
+def _convert_via_pymupdf(pdf_path: Path) -> Path:
+    """Extract text with pymupdf and rebuild as DOCX — best for Hebrew/RTL and custom encodings."""
+    try:
+        import fitz  # type: ignore[import]
+    except ImportError:
+        raise RuntimeError("pymupdf is not installed. Run: pip install pymupdf")
+    try:
+        from docx import Document  # type: ignore[import]
+        from docx.oxml import OxmlElement  # type: ignore[import]
+    except ImportError:
+        raise RuntimeError("python-docx is not installed. Run: pip install python-docx")
+
+    def _is_rtl(text: str) -> bool:
+        return any("\u0590" <= c <= "\u05ff" or "\u0600" <= c <= "\u06ff" or "\ufb1d" <= c <= "\ufb4f" for c in text)
+
+    pdf_doc = fitz.open(str(pdf_path))  # type: ignore[call-overload]
+    word_doc = Document()
+    log.debug("pdf2doc pymupdf: starting conversion pages=%d", pdf_doc.page_count)
+    for page_num, page in enumerate(pdf_doc):
+        for block in page.get_text("blocks", sort=True):  # type: ignore[call-arg]
+            if block[6] != 0:  # skip image blocks
+                continue
+            text = block[4].strip()
+            if not text:
+                continue
+            para = word_doc.add_paragraph(text)
+            if _is_rtl(text):
+                pPr = para._p.get_or_add_pPr()
+                pPr.append(OxmlElement("w:bidi"))
+        if page_num < pdf_doc.page_count - 1:
+            word_doc.add_page_break()
+    pdf_doc.close()
+    docx_path = pdf_path.with_suffix(".docx")
+    word_doc.save(str(docx_path))
+    log.debug("pdf2doc pymupdf: done output=%s", docx_path)
     return docx_path
 
 
@@ -516,7 +575,13 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
                 await bot.download(doc.file_id, destination=pdf_path)
                 try:
                     if shutil.which("libreoffice"):
-                        docx_path = await _convert_via_libreoffice(pdf_path, tmp)
+                        try:
+                            docx_path = await _convert_via_libreoffice(pdf_path, tmp)
+                            if _docx_text_seems_garbled(docx_path):
+                                log.debug("pdf2doc: libreoffice output garbled, falling back to pymupdf")
+                                docx_path = _convert_via_pymupdf(pdf_path)
+                        except:
+                            docx_path = _convert_via_pdf2docx(pdf_path)
                     else:
                         docx_path = _convert_via_pdf2docx(pdf_path)
                 except RuntimeError as exc:
