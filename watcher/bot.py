@@ -330,17 +330,27 @@ async def _edit_to_actions(query: CallbackQuery, w: wc.WatcherConfig, note: str 
 async def _convert_via_libreoffice(pdf_path: Path, tmp: str) -> Path:
     """Run LibreOffice headless conversion and return the .docx path."""
     log.debug("pdf2doc libreoffice: starting conversion input=%s outdir=%s", pdf_path, tmp)
+    # Each conversion gets its own LO profile dir to avoid lock contention
+    profile_dir = Path(tmp) / "lo_profile"
+    profile_dir.mkdir()
     proc = await asyncio.create_subprocess_exec(
-        "libreoffice", "--headless", "--convert-to", "docx",
+        "libreoffice",
+        f"-env:UserInstallation=file://{profile_dir}",
+        "--headless",
+        "--infilter=writer_pdf_import",
+        "--convert-to", "docx:MS Word 2007 XML",
         "--outdir", tmp, str(pdf_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
-    log.debug("pdf2doc libreoffice: returncode=%d stderr=%s", proc.returncode, stderr.decode().strip())
+    stdout, stderr = await proc.communicate()
+    log.debug(
+        "pdf2doc libreoffice: returncode=%d stdout=%s stderr=%s",
+        proc.returncode, stdout.decode().strip(), stderr.decode().strip(),
+    )
     if proc.returncode != 0:
-        raise RuntimeError(stderr.decode())
-    matches = list(Path(tmp).glob("*.docx"))
+        raise RuntimeError(stdout.decode() or stderr.decode() or f"exit code {proc.returncode}")
+    matches = [p for p in Path(tmp).glob("*.docx") if p.is_file()]
     log.debug("pdf2doc libreoffice: output files found=%s", [m.name for m in matches])
     if not matches:
         raise RuntimeError("LibreOffice produced no output file.")
@@ -500,7 +510,9 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             _pending.pop(message.chat.id, None)
             progress = await message.answer("Converting… ⏳")
             with tempfile.TemporaryDirectory() as tmp:
-                pdf_path = Path(tmp) / (doc.file_name or "input.pdf")
+                # Use a plain ASCII filename — LibreOffice fails on non-ASCII paths
+                pdf_path = Path(tmp) / "input.pdf"
+                original_stem = Path(doc.file_name or "output").stem
                 await bot.download(doc.file_id, destination=pdf_path)
                 try:
                     if shutil.which("libreoffice"):
@@ -513,8 +525,11 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
                         parse_mode="HTML",
                     )
                     return
+                # Rename output to preserve the original filename for the recipient
+                named_docx = docx_path.with_name(original_stem + ".docx")
+                docx_path.rename(named_docx)
                 await progress.edit_text("✅ Done")
-                await bot.send_document(message.chat.id, FSInputFile(docx_path))
+                await bot.send_document(message.chat.id, FSInputFile(named_docx))
             return
 
         # ── existing file-save logic ──────────────────────────────────────────
