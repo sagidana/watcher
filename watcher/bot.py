@@ -831,6 +831,10 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
                 parse_mode="HTML",
             )
 
+        # ── interval unit chosen via button — text input not expected ────────────
+        elif action == "edit_interval_unit":
+            await message.answer("Please choose a unit using the buttons above.")
+
         # ── waiting for a new interval value ───────────────────────────────────
         elif action == "edit_interval":
             if not text.isdigit() or int(text) <= 0:
@@ -937,10 +941,6 @@ def _build_dispatcher(chat_id: int) -> Dispatcher:
                 "name": text,
                 "ask_msg_id": ask.message_id,
             }
-
-        # ── interval unit chosen via button — text input not expected ────────────
-        elif action == "edit_interval_unit":
-            await message.answer("Please choose a unit using the buttons above.")
 
         # ── new watcher: unit chosen via button — text input not expected ───────
         elif action == "new_watcher_interval_unit":
