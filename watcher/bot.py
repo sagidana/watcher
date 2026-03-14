@@ -509,32 +509,6 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
 
     # ── Commands ───────────────────────────────────────────────────────────────
 
-    @dp.message(Command("start"))
-    async def cmd_start(message: Message) -> None:
-        log.info("cmd=start chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
-        _pending.pop(message.chat.id, None)
-        await message.answer(
-            "Watcher is running.\n\nCommands:\n/status — service status\n/watchers — manage watchers\n/clipboard — set clipboard\n/help — help",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-
-    @dp.message(Command("status"))
-    async def cmd_status(message: Message) -> None:
-        log.info("cmd=status chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
-        await message.answer("Status: running")
-
-    @dp.message(Command("help"))
-    async def cmd_help(message: Message) -> None:
-        log.info("cmd=help chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
-        await message.answer(
-            "/start     — greeting\n"
-            "/status    — service status\n"
-            "/watchers  — manage watchers\n"
-            "/clipboard — set clipboard\n"
-            "/pdf2docx  — convert PDF → DOCX\n"
-            "/help      — this message"
-        )
-
     @dp.message(Command("clipboard"))
     async def cmd_clipboard(message: Message) -> None:
         log.info("cmd=clipboard chat_id=%d user=%s", message.chat.id, message.from_user.username if message.from_user else None)
@@ -1275,9 +1249,6 @@ _BOT_COMMANDS = [
     BotCommand(command="files",     description="Files"),
     BotCommand(command="clipboard", description="Clipboard"),
     BotCommand(command="pdf2docx",  description="PDF → DOCX"),
-    BotCommand(command="status",    description="Status"),
-    BotCommand(command="help",      description="Help"),
-    BotCommand(command="start",     description="Start"),
 ]
 
 
