@@ -407,6 +407,39 @@ def _load_telegram_credentials() -> tuple[str, str]:
     return token, chat_id
 
 
+def cmd_pdf2docx(args: argparse.Namespace) -> None:
+    """Convert a local PDF file to DOCX and print the output path."""
+    import asyncio
+    import shutil
+    import tempfile
+    from watcher.bot import _convert_via_online
+
+    pdf_path = Path(args.file)
+    if not pdf_path.exists():
+        console.print(f"[red]✗[/red] File not found: [cyan]{pdf_path}[/cyan]")
+        sys.exit(1)
+    if pdf_path.suffix.lower() != ".pdf":
+        console.print(f"[red]✗[/red] Expected a .pdf file: [cyan]{pdf_path}[/cyan]")
+        sys.exit(1)
+
+    out_path = Path("/tmp") / f"{pdf_path.stem}.docx"
+    console.print(f"Converting [cyan]{pdf_path}[/cyan] ...")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Use a plain ASCII filename — LibreOffice and some online tools fail on non-ASCII paths
+        safe_pdf = Path(tmp) / "input.pdf"
+        shutil.copy2(pdf_path, safe_pdf)
+        try:
+            docx_path = asyncio.run(_convert_via_online(safe_pdf, tmp))
+        except Exception as exc:
+            console.print(f"[red]✗[/red] Conversion failed: {exc}")
+            sys.exit(1)
+        shutil.copy2(docx_path, out_path)
+
+    console.print(f"[green]✓[/green] [cyan]{out_path}[/cyan]")
+    print(out_path)
+
+
 def cmd_message(args: argparse.Namespace) -> None:
     """Send a Telegram message (text and/or file) to the configured chat."""
     token, chat_id = _load_telegram_credentials()
@@ -479,6 +512,9 @@ def main() -> None:
     msg_parser.add_argument("--text", metavar="TEXT", help="Text to send")
     msg_parser.add_argument("--file", metavar="PATH", help="File to send as a document")
 
+    pdf_parser = sub.add_parser("pdf2docx", help="Convert a PDF file to DOCX (output written to /tmp/)")
+    pdf_parser.add_argument("--file", metavar="PATH", required=True, help="Path to the PDF file to convert")
+
     args = parser.parse_args()
 
     commands = {
@@ -488,6 +524,7 @@ def main() -> None:
         "run": cmd_run,
         "reload": cmd_reload,
         "message": cmd_message,
+        "pdf2docx": cmd_pdf2docx,
     }
     commands[args.command](args)
 
