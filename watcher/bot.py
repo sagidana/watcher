@@ -331,7 +331,7 @@ async def _edit_to_actions(query: CallbackQuery, w: wc.WatcherConfig, note: str 
 
 async def _convert_via_libreoffice(pdf_path: Path, tmp: str) -> Path:
     """Run LibreOffice headless conversion and return the .docx path."""
-    log.debug("pdf2doc libreoffice: starting conversion input=%s outdir=%s", pdf_path, tmp)
+    log.debug("pdf2docx libreoffice: starting conversion input=%s outdir=%s", pdf_path, tmp)
     # Each conversion gets its own LO profile dir to avoid lock contention
     profile_dir = Path(tmp) / "lo_profile"
     profile_dir.mkdir()
@@ -350,16 +350,16 @@ async def _convert_via_libreoffice(pdf_path: Path, tmp: str) -> Path:
     )
     stdout, stderr = await proc.communicate()
     log.debug(
-        "pdf2doc libreoffice: returncode=%d stdout=%s stderr=%s",
+        "pdf2docx libreoffice: returncode=%d stdout=%s stderr=%s",
         proc.returncode, stdout.decode().strip(), stderr.decode().strip(),
     )
     if proc.returncode != 0:
         raise RuntimeError(stdout.decode() or stderr.decode() or f"exit code {proc.returncode}")
     matches = [p for p in Path(tmp).glob("*.docx") if p.is_file()]
-    log.debug("pdf2doc libreoffice: output files found=%s", [m.name for m in matches])
+    log.debug("pdf2docx libreoffice: output files found=%s", [m.name for m in matches])
     if not matches:
         raise RuntimeError("LibreOffice produced no output file.")
-    log.debug("pdf2doc libreoffice: done output=%s", matches[0])
+    log.debug("pdf2docx libreoffice: done output=%s", matches[0])
     return matches[0]
 
 
@@ -373,14 +373,14 @@ def _convert_via_pdf2docx(pdf_path: Path) -> Path:
             "Install LibreOffice for best results."
         )
     docx_path = pdf_path.with_suffix(".docx")
-    log.debug("pdf2doc pdf2docx: starting conversion input=%s output=%s", pdf_path, docx_path)
+    log.debug("pdf2docx pdf2docx: starting conversion input=%s output=%s", pdf_path, docx_path)
     cv = Converter(str(pdf_path))
     cv.convert(str(docx_path))
     cv.close()
-    log.debug("pdf2doc pdf2docx: conversion finished exists=%s", docx_path.exists())
+    log.debug("pdf2docx pdf2docx: conversion finished exists=%s", docx_path.exists())
     if not docx_path.exists():
         raise RuntimeError("pdf2docx produced no output file.")
-    log.debug("pdf2doc pdf2docx: done output=%s", docx_path)
+    log.debug("pdf2docx pdf2docx: done output=%s", docx_path)
     return docx_path
 
 
@@ -392,12 +392,12 @@ def _docx_text_seems_garbled(docx_path: Path) -> bool:
         return False
     text = "".join(p.text for p in Document(str(docx_path)).paragraphs)
     if not text.strip():
-        log.debug("pdf2doc garble-check: no text found in output")
+        log.debug("pdf2docx garble-check: no text found in output")
         return True
     # U+FFFD = replacement char; U+E000-U+F8FF = Private Use Area (raw glyph IDs leak here)
     garbage = sum(1 for c in text if c == "\ufffd" or "\ue000" <= c <= "\uf8ff")
     ratio = garbage / len(text)
-    log.debug("pdf2doc garble-check: garbage ratio=%.2f", ratio)
+    log.debug("pdf2docx garble-check: garbage ratio=%.2f", ratio)
     return ratio > 0.05
 
 
@@ -418,7 +418,7 @@ def _convert_via_pymupdf(pdf_path: Path) -> Path:
 
     pdf_doc = fitz.open(str(pdf_path))  # type: ignore[call-overload]
     word_doc = Document()
-    log.debug("pdf2doc pymupdf: starting conversion pages=%d", pdf_doc.page_count)
+    log.debug("pdf2docx pymupdf: starting conversion pages=%d", pdf_doc.page_count)
     for page_num, page in enumerate(pdf_doc):
         for block in page.get_text("blocks", sort=True):  # type: ignore[call-arg]
             if block[6] != 0:  # skip image blocks
@@ -435,7 +435,7 @@ def _convert_via_pymupdf(pdf_path: Path) -> Path:
     pdf_doc.close()
     docx_path = pdf_path.with_suffix(".docx")
     word_doc.save(str(docx_path))
-    log.debug("pdf2doc pymupdf: done output=%s", docx_path)
+    log.debug("pdf2docx pymupdf: done output=%s", docx_path)
     return docx_path
 
 
@@ -447,21 +447,21 @@ async def _convert_via_online(pdf_path: Path, tmp: str, *, headed: bool = False)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
         try:
-            log.debug("pdf2doc: online: navigating to ilovepdf")
+            log.debug("pdf2docx: online: navigating to ilovepdf")
             await page.goto("https://www.ilovepdf.com/pdf_to_word", timeout=30_000)
 
             # Selecting the file triggers auto-upload+conversion, redirects to /download/...,
             # then the page auto-fires the file download — no button click required.
-            log.debug("pdf2doc: online: selecting file (triggers auto-upload+convert+download)")
+            log.debug("pdf2docx: online: selecting file (triggers auto-upload+convert+download)")
             async with page.expect_download(timeout=180_000) as dl_info:
                 await page.set_input_files("input[type='file']", str(pdf_path))
-            log.debug("pdf2doc: online: download captured")
+            log.debug("pdf2docx: online: download captured")
             download = await dl_info.value
             if download.failure():
                 raise RuntimeError(f"download failed: {download.failure()}")
             out = Path(tmp) / (download.suggested_filename or "converted.docx")
             await download.save_as(str(out))
-            log.debug("pdf2doc: online: done output=%s", out)
+            log.debug("pdf2docx: online: done output=%s", out)
             return out
         finally:
             await browser.close()
@@ -495,7 +495,7 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             "/status    — service status\n"
             "/watchers  — manage watchers\n"
             "/clipboard — set clipboard\n"
-            "/pdf2doc   — convert PDF → DOCX\n"
+            "/pdf2docx  — convert PDF → DOCX\n"
             "/help      — this message"
         )
 
@@ -528,12 +528,12 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
 
     # ── PDF → DOCX conversion ──────────────────────────────────────────────────
 
-    @dp.message(Command("pdf2doc"))
-    async def cmd_pdf2doc(message: Message) -> None:
-        log.info("cmd=pdf2doc chat_id=%d", message.chat.id)
+    @dp.message(Command("pdf2docx"))
+    async def cmd_pdf2docx(message: Message) -> None:
+        log.info("cmd=pdf2docx chat_id=%d", message.chat.id)
         _pending.pop(message.chat.id, None)
         ask = await message.answer("Send me a PDF file to convert to DOCX:")
-        _pending[message.chat.id] = {"action": "pdf2doc", "ask_msg_id": ask.message_id}
+        _pending[message.chat.id] = {"action": "pdf2docx", "ask_msg_id": ask.message_id}
 
     # ── Files ──────────────────────────────────────────────────────────────────
 
@@ -589,8 +589,8 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
     async def handle_file(message: Message, bot: Bot) -> None:
         pending = _pending.get(message.chat.id)
 
-        # ── pdf2doc conversion ────────────────────────────────────────────────
-        if pending and pending.get("action") == "pdf2doc" and message.document:
+        # ── pdf2docx conversion ────────────────────────────────────────────────
+        if pending and pending.get("action") == "pdf2docx" and message.document:
             doc = message.document
             if doc.mime_type != "application/pdf":
                 await message.answer("❌ That's not a PDF. Please send a .pdf file:")
@@ -1238,7 +1238,7 @@ _BOT_COMMANDS = [
     BotCommand(command="watchers",  description="Watchers"),
     BotCommand(command="files",     description="Files"),
     BotCommand(command="clipboard", description="Clipboard"),
-    BotCommand(command="pdf2doc",   description="Convert PDF → DOCX"),
+    BotCommand(command="pdf2docx",  description="PDF → DOCX"),
     BotCommand(command="status",    description="Status"),
     BotCommand(command="help",      description="Help"),
     BotCommand(command="start",     description="Start"),

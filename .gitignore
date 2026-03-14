@@ -53,3 +53,5 @@ htmlcov/
 
 # Ruff / linting
 .ruff_cache/
+
+.claude
