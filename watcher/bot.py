@@ -441,28 +441,64 @@ def _convert_via_pymupdf(pdf_path: Path) -> Path:
 
 async def _convert_via_online(pdf_path: Path, tmp: str, *, headed: bool = False) -> Path:
     """Convert PDF→DOCX using ilovepdf.com via Playwright (best for Hebrew/RTL)."""
-    from playwright.async_api import async_playwright
+    import re as _re
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+
+    tool_url = "https://www.ilovepdf.com/pdf_to_word"
+    out_dir = Path(tmp)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    log.debug("pdf2docx: online: navigating to ilovepdf")
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=not headed)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
-        try:
-            log.debug("pdf2docx: online: navigating to ilovepdf")
-            await page.goto("https://www.ilovepdf.com/pdf_to_word", timeout=30_000)
 
-            # Selecting the file triggers auto-upload+conversion, redirects to /download/...,
-            # then the page auto-fires the file download — no button click required.
-            log.debug("pdf2docx: online: selecting file (triggers auto-upload+convert+download)")
-            async with page.expect_download(timeout=180_000) as dl_info:
-                await page.set_input_files("input[type='file']", str(pdf_path))
-            log.debug("pdf2docx: online: download captured")
+        try:
+            # ── 1. Open the tool page ──────────────────────────────────────
+            await page.goto(tool_url, wait_until="networkidle")
+
+            # ── 2. Upload via the hidden <input type="file"> ───────────────
+            file_input = page.locator('input[type="file"]').first
+            await file_input.set_input_files(str(pdf_path))
+            log.debug("pdf2docx: online: file set, waiting for upload to finish")
+
+            await page.wait_for_selector(
+                f'text="{pdf_path.name}"', timeout=30_000
+            )
+
+            # ── 3. Click the Convert button ────────────────────────────────
+            convert_btn = page.get_by_role(
+                "button", name=_re.compile(r"convert", _re.IGNORECASE)
+            )
+            await convert_btn.wait_for(state="visible", timeout=15_000)
+            await convert_btn.click()
+            log.debug("pdf2docx: online: conversion started")
+
+            # ── 4. Wait for the Download link and trigger download ─────────
+            download_link = page.get_by_role(
+                "link", name=_re.compile(r"download", _re.IGNORECASE)
+            )
+            try:
+                await download_link.wait_for(state="visible", timeout=120_000)
+            except PWTimeout:
+                raise RuntimeError(
+                    "Download link never appeared – conversion may have failed."
+                )
+
+            async with page.expect_download(timeout=60_000) as dl_info:
+                await download_link.click()
+
             download = await dl_info.value
-            if download.failure():
-                raise RuntimeError(f"download failed: {download.failure()}")
-            out = Path(tmp) / (download.suggested_filename or "converted.docx")
+            failure = await download.failure()
+            if failure:
+                raise RuntimeError(f"download failed: {failure}")
+            suggested = download.suggested_filename or (pdf_path.stem + ".docx")
+            out = out_dir / suggested
             await download.save_as(str(out))
             log.debug("pdf2docx: online: done output=%s", out)
             return out
+
         finally:
             await browser.close()
 

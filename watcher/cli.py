@@ -430,7 +430,7 @@ def cmd_pdf2docx(args: argparse.Namespace) -> None:
         safe_pdf = Path(tmp) / "input.pdf"
         shutil.copy2(pdf_path, safe_pdf)
         try:
-            docx_path = asyncio.run(_convert_via_online(safe_pdf, tmp))
+            docx_path = asyncio.run(_convert_via_online(safe_pdf, tmp, headed=True))
         except Exception as exc:
             console.print(f"[red]✗[/red] Conversion failed: {exc}")
             sys.exit(1)
