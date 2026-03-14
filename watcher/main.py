@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import load_settings
 from .bot import run_bot
 from .engine import run_engine
+from .fetchers.browser import close_shared_browser
 
 LOG_FILE = Path("/tmp/watcher.log")
 
@@ -60,6 +61,7 @@ async def run(headed: bool = False) -> None:
     await asyncio.gather(engine_task, return_exceptions=True)
     log.info("[shutdown] engine task done")
 
+    await close_shared_browser()
     log.info("[shutdown] run() complete — event loop will close")
 
 

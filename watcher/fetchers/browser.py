@@ -1,16 +1,26 @@
 """
-Persistent browser fetcher for a single watcher.
+Browser fetcher backed by a single shared persistent Playwright context.
 
-Keeps one Playwright browser context alive per watcher to avoid the overhead
-of spawning a fresh browser on every poll cycle.
+All watchers share one Chromium profile at ~/.config/watcher/browser-profile/
+so that cookies/sessions (e.g. Google login) are preserved across restarts and
+visible to every watcher.
+
+Playwright locks a user-data-dir to a single process, so a module-level
+singleton holds the context; each BrowserFetcher owns only its page.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from pathlib import Path
+
+from watcher.config import CONFIG_DIR
 
 log = logging.getLogger("watcher.fetcher.browser")
+
+PROFILE_DIR: Path = CONFIG_DIR / "browser-profile"
 
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) "
@@ -47,6 +57,68 @@ _EXTRACT_JS = """
 }
 """
 
+# ---------------------------------------------------------------------------
+# Shared persistent context (module-level singleton)
+# ---------------------------------------------------------------------------
+
+_lock: asyncio.Lock | None = None
+_playwright = None
+_context = None
+
+
+def _get_lock() -> asyncio.Lock:
+    """Return the module-level lock, creating it lazily inside a running loop."""
+    global _lock
+    if _lock is None:
+        _lock = asyncio.Lock()
+    return _lock
+
+
+async def _get_shared_context(headless: bool = True):
+    """Return the shared persistent browser context, launching it if needed."""
+    global _playwright, _context
+
+    async with _get_lock():
+        if _context is None:
+            from playwright.async_api import async_playwright
+
+            PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+            log.info("[browser] launching persistent context (profile: %s)", PROFILE_DIR)
+            _playwright = await async_playwright().start()
+            _context = await _playwright.chromium.launch_persistent_context(
+                str(PROFILE_DIR),
+                headless=headless,
+                user_agent=_USER_AGENT,
+            )
+
+    return _context
+
+
+async def close_shared_browser() -> None:
+    """Shut down the shared context.  Call once at process exit."""
+    global _playwright, _context
+
+    if _context is not None:
+        try:
+            await _context.close()
+        except Exception:
+            log.exception("[browser] error closing shared context")
+        finally:
+            _context = None
+
+    if _playwright is not None:
+        try:
+            await _playwright.stop()
+        except Exception:
+            log.exception("[browser] error stopping playwright")
+        finally:
+            _playwright = None
+
+
+# ---------------------------------------------------------------------------
+# Per-watcher fetcher (owns only a page)
+# ---------------------------------------------------------------------------
+
 
 class BrowserFetcher:
     """
@@ -54,23 +126,21 @@ class BrowserFetcher:
         await fetcher.start(url)
         text = await fetcher.fetch()   # call repeatedly
         await fetcher.close()
+
+    All instances share a single Chromium profile so logins persist globally.
     """
 
     def __init__(self) -> None:
-        self._playwright = None
-        self._browser = None
-        self._context = None
         self._page = None
         self._url: str = ""
+        self._headless: bool = True
 
     async def start(self, url: str, headless: bool = True) -> None:
-        from playwright.async_api import async_playwright
-
         self._url = url
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=headless)
-        self._context = await self._browser.new_context(user_agent=_USER_AGENT)
-        self._page = await self._context.new_page()
+        self._headless = headless
+
+        context = await _get_shared_context(headless=headless)
+        self._page = await context.new_page()
 
         try:
             from playwright_stealth import stealth_async  # type: ignore
@@ -106,6 +176,24 @@ class BrowserFetcher:
 
         await self._page.reload(wait_until="domcontentloaded", timeout=20_000)
 
+    async def _reopen_page(self) -> None:
+        """Close the current page and open a fresh one from the shared context."""
+        if self._page:
+            try:
+                await self._page.close()
+            except Exception:
+                pass
+            self._page = None
+
+        context = await _get_shared_context(headless=self._headless)
+        self._page = await context.new_page()
+
+        try:
+            from playwright_stealth import stealth_async  # type: ignore
+            await stealth_async(self._page)
+        except ImportError:
+            pass
+
     async def fetch(self) -> str:
         """Reload the page and return visible text content (normalised)."""
         assert self._page is not None
@@ -113,17 +201,16 @@ class BrowserFetcher:
         try:
             await self._reload()
         except Exception as exc:
-            log.warning("fetch [%s]: reload failed (%s), attempting browser restart", self._url, exc)
+            log.warning("fetch [%s]: reload failed (%s), reopening page", self._url, exc)
             try:
-                await self.close()
-                await self.start(self._url)
-            except Exception as restart_exc:
-                log.error("fetch [%s]: browser restart failed: %s", self._url, restart_exc)
+                await self._reopen_page()
+                await self._goto(self._url)
+            except Exception as reopen_exc:
+                log.error("fetch [%s]: page reopen failed: %s", self._url, reopen_exc)
                 return ""
 
         try:
             content: str = await self._page.evaluate(_EXTRACT_JS, None)
-            # log.debug("[browser] extracted %d chars from %s", len(content), self._url)
             log.debug("[browser] '%s' -> extracted %s", self._url, content)
             return _normalise(content)
         except Exception:
@@ -131,19 +218,14 @@ class BrowserFetcher:
             return ""
 
     async def close(self) -> None:
+        """Close this watcher's page.  The shared context/browser stays open."""
         try:
             if self._page:
                 await self._page.close()
-            if self._context:
-                await self._context.close()
-            if self._browser:
-                await self._browser.close()
-            if self._playwright:
-                await self._playwright.stop()
         except Exception:
-            log.exception("[browser] error during close")
+            log.exception("[browser] error closing page for %s", self._url)
         finally:
-            self._page = self._context = self._browser = self._playwright = None
+            self._page = None
 
 
 def _normalise(text: str) -> str:
