@@ -196,7 +196,14 @@ class BrowserFetcher:
 
     async def fetch(self) -> str:
         """Reload the page and return visible text content (normalised)."""
-        assert self._page is not None
+        if self._page is None:
+            log.warning("fetch [%s]: page is None, reopening", self._url)
+            try:
+                await self._reopen_page()
+                await self._goto(self._url)
+            except Exception as exc:
+                log.error("fetch [%s]: reopen after None page failed: %s", self._url, exc)
+                return ""
 
         try:
             await self._reload()
