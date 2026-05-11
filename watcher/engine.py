@@ -2,17 +2,17 @@
 Monitoring engine.
 
 run_engine() scans ~/.config/watcher/watchers/ every 10 s and keeps one
-asyncio task per enabled watcher.  Each task polls its target at the
-configured interval and sends a Telegram notification when the content changes.
+asyncio task per enabled watcher.  Each task invokes `cai` at the configured
+interval, runs the prompt chain, and sends the final cai response to Telegram.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -21,95 +21,148 @@ from typing import Optional
 _CAI_BIN = str(Path(sys.executable).parent / "cai")
 
 from .config import Settings
-from .fetchers.browser import BrowserFetcher
-from .notifier import build_short_diff, notify_change
+from .notifier import notify_change
 from .watchers_config import WatcherConfig, load_all
 
 log = logging.getLogger("watcher.engine")
 
-SNAPSHOTS_DIR = Path("~/.config/watcher/watchers").expanduser()
 RESCAN_INTERVAL = 10  # seconds between directory scans
 
 
-# ---------------------------------------------------------------------------
-# Snapshot helpers (file-based)
-# ---------------------------------------------------------------------------
-
-def _snapshot_path(watcher_id: str) -> Path:
-    return SNAPSHOTS_DIR / f"{watcher_id}.snapshot"
+def _default_system_prompt() -> str:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"time is {now}, you are a professions web searcher and investigator"
 
 
-def _get_snapshot(watcher_id: str) -> tuple[Optional[str], Optional[str]]:
-    """Return (hash, text) or (None, None) if no snapshot exists yet."""
-    path = _snapshot_path(watcher_id)
-    if not path.exists():
-        return None, None
-    data = path.read_text(encoding="utf-8")
-    first_newline = data.index("\n")
-    return data[:first_newline], data[first_newline + 1:]
+def is_content_empty(content) -> bool:
+    if content is None:
+        return True
+    if len(content) == 0:
+        return True
+    content = content.strip()
 
+    if content == "\"\"":
+        return True
+    if content.lower() == "none":
+        return True
+    if content.lower() == "false":
+        return True
 
-def _save_snapshot(watcher_id: str, h: str, text: str) -> None:
-    path = _snapshot_path(watcher_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{h}\n{text}", encoding="utf-8")
+    return False
 
 
 # ---------------------------------------------------------------------------
-# cai filter
+# cai invocation
 # ---------------------------------------------------------------------------
 
-async def _cai_filter(watcher_id: str, prompt: str, diff: str):
+async def _run_cai(
+    watcher_id: str,
+    *,
+    model: str,
+    tools: list[str],
+    system_prompt: str,
+    prompt: str,
+    input_file: Optional[str] = None,
+    timeout: int = 600,
+) -> Optional[str]:
     """
-    Run the diff through `cai` with the watcher's prompt.
-    Returns True if cai says the change is relevant, False otherwise.
+    Invoke cai with the given parameters and return stdout.
+    Returns None on error/empty output.
     """
-    tmp_path = None
+    args: list[str] = [_CAI_BIN, "--model", model]
+    if tools:
+        args += ["--tools", *tools]
+    if system_prompt:
+        args += ["--system-prompt", system_prompt]
+    if input_file:
+        args += ["--file", input_file]
+    args += ["--", prompt]
+
+    log.info("[watch:%s] running cai (model=%s tools=%s)", watcher_id, model, tools)
+    log.debug("[watch:%s] cai prompt: %s", watcher_id, prompt)
+
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, prefix="watcher_diff_"
-        ) as f:
-            tmp_path = f.name
-            f.write(diff)
-
         proc = await asyncio.create_subprocess_exec(
-            _CAI_BIN,
-            "--file", tmp_path,
-            # "--system-prompt", 'in the case you have nothing you want to pass through, always return ine',
-            "--",
-            prompt,
+            *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        log.info("[watch:%s] cai prompt: %s", watcher_id, prompt)
-        log.info("[watch:%s] cai diff:\n%s", watcher_id, diff)
-
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
-            log.warning("[watch:%s] cai timed out after 30s", watcher_id)
+            log.warning("[watch:%s] cai timed out after %ds", watcher_id, timeout)
             return None
 
-        log.debug("[watch:%s] cai stdout: %s", watcher_id, stdout.decode().strip())
         if stderr:
-            log.debug("[watch:%s] cai stderr: %s", watcher_id, stderr.decode().strip())
+            log.debug("[watch:%s] cai stderr: %s", watcher_id, stderr.decode(errors="replace").strip())
 
         if proc.returncode != 0:
             log.warning(
                 "[watch:%s] cai exited with code %d: %s",
-                watcher_id, proc.returncode, stderr.decode().strip(),
+                watcher_id, proc.returncode, stderr.decode(errors="replace").strip(),
             )
             return None
 
-        result = stdout.decode().strip()
-        log.info("[watch:%s] cai filter result: %s", watcher_id, result)
+        result = stdout.decode(errors="replace").strip()
+        log.debug("[watch:%s] cai stdout: %s", watcher_id, result)
         return result or None
 
     except Exception:
-        log.exception("[watch:%s] cai filter failed — notifying anyway", watcher_id)
-        return f"(cai filter unavailable — content changed)\n{diff}"
+        log.exception("[watch:%s] cai invocation failed", watcher_id)
+        return None
+
+
+async def _run_prompt_chain(watcher: WatcherConfig) -> Optional[str]:
+    """Run cai for each prompt in sequence; pass prior output via --file. Stop on empty."""
+    if not watcher.prompts:
+        return None
+
+    system_prompt = watcher.system_prompt.strip() or _default_system_prompt()
+    content: Optional[str] = None
+    tmp_path: Optional[str] = None
+
+    try:
+        for i, prompt in enumerate(watcher.prompts):
+            log.info("[watch:%s] running prompt %d/%d", watcher.id, i + 1, len(watcher.prompts))
+
+            input_file: Optional[str] = None
+            if i > 0 and content:
+                # Hand the prior step's output to cai as --file input.
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", delete=False, prefix=f"watcher_{watcher.id}_"
+                ) as f:
+                    tmp_path = f.name
+                    f.write(content)
+                input_file = tmp_path
+
+            content = await _run_cai(
+                watcher.id,
+                model=watcher.model,
+                tools=watcher.tools,
+                system_prompt=system_prompt,
+                prompt=prompt,
+                input_file=input_file,
+            )
+
+            # Clean up the per-step temp file before the next iteration.
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink()
+                except OSError:
+                    pass
+                tmp_path = None
+
+            if is_content_empty(content):
+                log.info("[watch:%s] prompt %d/%d produced empty result — stopping chain",
+                         watcher.id, i + 1, len(watcher.prompts))
+                return None
+
+            log.info("[watch:%s] prompt %d/%d produced %d chars",
+                     watcher.id, i + 1, len(watcher.prompts), len(content or ""))
+
+        return content
     finally:
         if tmp_path:
             try:
@@ -119,125 +172,48 @@ async def _cai_filter(watcher_id: str, prompt: str, diff: str):
 
 
 # ---------------------------------------------------------------------------
-# Per-watcher task
+# Per-watcher run
 # ---------------------------------------------------------------------------
 
-def is_content_empty(content) -> bool:
-    if content is None: return True
-    if len(content) == 0: return True
-    content = content.strip()
-
-    if content == "\"\"": return True
-    if content.lower() == "none": return True
-    if content.lower() == "false": return True
-
-    return False
-
-
-async def _run_prompt_chain(watcher_id: str, prompts: list[str], diff: str) -> Optional[str]:
-    """Run diff through each prompt in sequence; stop early if a prompt returns empty."""
-    content: Optional[str] = diff
-    for i, prompt in enumerate(prompts):
-        log.info("[watch:%s] running prompt %d/%d", watcher_id, i + 1, len(prompts))
-        content = await _cai_filter(watcher_id, prompt, content)
-        if not content:
-            log.info("[watch:%s] prompt %d/%d produced empty result — stopping chain", watcher_id, i + 1, len(prompts))
-            break
-        log.info("[watch:%s] prompt %d/%d produced result: %s", watcher_id, i + 1, len(prompts), content)
-    return content or None
-
-
-async def _poll_once(
-    settings: Settings,
-    watcher: WatcherConfig,
-    fetcher: BrowserFetcher,
-    last_hash: Optional[str],
-    last_text: Optional[str],
-) -> tuple[str, str, bool]:
-    """Fetch, compare, and notify if changed. Returns (new_hash, new_text, changed)."""
-    log.debug("[watch:%s] fetching %s", watcher.id, watcher.url)
-    text = await fetcher.fetch()
-    log.debug("[watch:%s] fetched %d chars: %s", watcher.id, len(text), text[:200])
-    h = hashlib.sha256(text.encode()).hexdigest()
-
-    if last_hash is None or h == last_hash:
-        return h, text, False
-
-    log.info("[watch:%s] change detected", watcher.id)
-    diff = build_short_diff(last_text or "", text)
-    notification_text = (
-        await _run_prompt_chain(watcher.id, watcher.prompts, diff)
-        if watcher.prompts
-        else diff
-    )
-
-    if not is_content_empty(notification_text):
-        assert notification_text is not None
-        await notify_change(settings, watcher, notification_text)
-
-    return h, text, True
+async def _run_once(settings: Settings, watcher: WatcherConfig) -> bool:
+    """Run the prompt chain once and notify if it produced output. Returns True on notify."""
+    output = await _run_prompt_chain(watcher)
+    if is_content_empty(output):
+        return False
+    assert output is not None
+    await notify_change(settings, watcher, output)
+    return True
 
 
 async def fetch_once(settings: Settings, watcher: WatcherConfig) -> str:
     """
-    One-shot fetch outside the regular poll loop.
-
-    Creates a temporary BrowserFetcher, runs _poll_once (which will notify if
-    content changed), persists the new snapshot and records the run.
-    Returns "changed", "ok", or "error".
+    One-shot run outside the regular poll loop.
+    Returns "ok" if a notification was sent, "empty" if not, or "error".
     """
-    fetcher = BrowserFetcher()
     try:
-        await fetcher.start(watcher.url, headless=not settings.headed)
-        last_hash, last_text = _get_snapshot(watcher.id)
-        new_hash, new_text, changed = await _poll_once(
-            settings, watcher, fetcher, last_hash, last_text
-        )
-        _save_snapshot(watcher.id, new_hash, new_text)
-        return "changed" if changed else "ok"
+        sent = await _run_once(settings, watcher)
+        return "ok" if sent else "empty"
     except Exception:
         log.exception("[watch:%s] fetch_once failed", watcher.id)
         return "error"
-    finally:
-        await fetcher.close()
 
 
 async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
     log.info("[watch:%s] task started", watcher.id)
-    fetcher = BrowserFetcher()
-
-    try:
-        log.info("[watch:%s] launching browser fetcher", watcher.id)
-        await fetcher.start(watcher.url, headless=not settings.headed)
-        log.info("[watch:%s] browser fetcher ready", watcher.id)
-    except Exception:
-        log.exception("[watch:%s] failed to start fetcher", watcher.id)
-        return
-
-    last_hash, last_text = _get_snapshot(watcher.id)
-
     try:
         while True:
             try:
-                new_hash, new_text, changed = await _poll_once(
-                    settings, watcher, fetcher, last_hash, last_text
-                )
-                _save_snapshot(watcher.id, new_hash, new_text)
-                last_hash, last_text = new_hash, new_text
+                await _run_once(settings, watcher)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("[watch:%s] unexpected error during poll", watcher.id)
+                log.exception("[watch:%s] unexpected error during run", watcher.id)
 
             log.debug("[watch:%s] sleeping %ds", watcher.id, watcher.interval)
             await asyncio.sleep(watcher.interval)
     except asyncio.CancelledError:
-        log.info("[watch:%s] task cancelled — entering finally", watcher.id)
+        log.info("[watch:%s] task cancelled", watcher.id)
         raise
-    finally:
-        log.info("[watch:%s] closing browser fetcher...", watcher.id)
-        await fetcher.close()
-        log.info("[watch:%s] browser fetcher closed", watcher.id)
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +221,13 @@ async def _watch_task(settings: Settings, watcher: WatcherConfig) -> None:
 # ---------------------------------------------------------------------------
 
 def _config_changed(old: WatcherConfig, new: WatcherConfig) -> bool:
-    return old.url != new.url or old.interval != new.interval or old.prompts != new.prompts
+    return (
+        old.interval != new.interval
+        or old.prompts != new.prompts
+        or old.model != new.model
+        or old.system_prompt != new.system_prompt
+        or old.tools != new.tools
+    )
 
 
 async def _cancel_task(task: asyncio.Task) -> None:

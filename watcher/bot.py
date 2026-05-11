@@ -17,7 +17,6 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -148,19 +147,6 @@ def _watchers_list_text(watchers: list[wc.WatcherConfig]) -> str:
     return f"📡 <b>Watchers</b>  <i>({subtitle})</i>"
 
 
-def _name_from_url(url: str) -> str:
-    """Deduce a short display name from a URL."""
-    try:
-        p = urlparse(url)
-        host = p.netloc
-        if host.startswith("www."):
-            host = host[4:]
-        path = p.path.rstrip("/")
-        return (host + path) if path else host
-    except Exception:
-        return url
-
-
 def _watchers_list_kb(watchers: list[wc.WatcherConfig]) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(
@@ -210,12 +196,14 @@ def _unit_sel_new_kb() -> InlineKeyboardMarkup:
 def _actions_kb(w: wc.WatcherConfig) -> InlineKeyboardMarkup:
     toggle = "🔴 Disable" if w.enabled else "🟢 Enable"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ Fetch Now",      callback_data=f"w:fetch_now:{w.id}")],
-        [InlineKeyboardButton(text="📋 Get Snapshot",   callback_data=f"w:get_snapshot:{w.id}")],
+        [InlineKeyboardButton(text="⚡ Run Now",        callback_data=f"w:fetch_now:{w.id}")],
         [InlineKeyboardButton(text=toggle,              callback_data=f"w:toggle:{w.id}")],
         [InlineKeyboardButton(text="✏️ Rename",         callback_data=f"w:rename:{w.id}")],
         [InlineKeyboardButton(text="⏱  Set Interval",  callback_data=f"w:interval:{w.id}")],
         [InlineKeyboardButton(text="📝 Prompts",        callback_data=f"w:prompts:{w.id}")],
+        [InlineKeyboardButton(text="🤖 Model",          callback_data=f"w:model:{w.id}")],
+        [InlineKeyboardButton(text="💬 System Prompt",  callback_data=f"w:sysprompt:{w.id}")],
+        [InlineKeyboardButton(text="🛠 Tools",          callback_data=f"w:tools:{w.id}")],
         [InlineKeyboardButton(text="🗑 Delete",         callback_data=f"w:delete:{w.id}")],
         [InlineKeyboardButton(text="◀ Back",  callback_data="w:list"),
          _done_btn()],
@@ -242,6 +230,33 @@ def _input_cancel_kb(wid: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✖  Done", callback_data=f"w:cancel_input:{wid}"),
     ]])
+
+
+def _model_kb(wid: str, current: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text=("● " if m == current else "○ ") + m,
+            callback_data=f"w:setmodel:{wid}:{i}",
+        )]
+        for i, m in enumerate(wc.AVAILABLE_MODELS)
+    ]
+    rows.append([InlineKeyboardButton(text="✖ Cancel", callback_data=f"w:cancel_input:{wid}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _tools_kb(wid: str, selected: list[str]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text=("✅ " if t in selected else "⬜ ") + t,
+            callback_data=f"w:tt:{wid}:{i}",
+        )]
+        for i, t in enumerate(wc.AVAILABLE_TOOLS)
+    ]
+    rows.append([
+        InlineKeyboardButton(text="💾 Save",   callback_data=f"w:tools_save:{wid}"),
+        InlineKeyboardButton(text="✖ Cancel", callback_data=f"w:cancel_input:{wid}"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _cleanup_prompts_ui(bot: Bot, chat_id: int) -> None:
@@ -289,10 +304,14 @@ async def _render_prompts(bot: Bot, chat_id: int, wid: str) -> None:
 
 def _watcher_info_text(w: wc.WatcherConfig) -> str:
     status = "🟢 enabled" if w.enabled else "🔴 disabled"
+    sys_prompt = w.system_prompt.strip() or "(default)"
+    tools = ", ".join(w.tools) if w.tools else "(none)"
     return (
         f"<b>{_html.escape(w.name)}</b>\n"
-        f"{_html.escape(w.url)}\n"
-        f"Interval: {w.interval}s | {status}"
+        f"Interval: {w.interval}s | {status}\n"
+        f"Model: <code>{_html.escape(w.model)}</code>\n"
+        f"Tools: <code>{_html.escape(tools)}</code>\n"
+        f"System prompt: <i>{_html.escape(sys_prompt)}</i>"
     )
 
 
@@ -756,40 +775,19 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
         if w is None:
             await query.answer("Watcher not found.", show_alert=True)
             return
-        await query.answer("⚡ Fetching…")
+        await query.answer("⚡ Running…")
         await query.message.edit_text(  # type: ignore[union-attr]
-            f"{_watcher_info_text(w)}\n⏳ Fetching…",
+            f"{_watcher_info_text(w)}\n⏳ Running…",
             parse_mode="HTML",
         )
         status = await engine.fetch_once(settings, w)
         w = wc.get(wid) or w
         notes = {
-            "changed": "✅ Change detected — notification sent.",
-            "ok":      "✅ No change.",
-            "error":   "❌ Fetch failed — see logs.",
+            "ok":    "✅ Notification sent.",
+            "empty": "✅ Ran — no output to send.",
+            "error": "❌ Run failed — see logs.",
         }
         await _edit_to_actions(query, w, notes.get(status, status))
-
-    @dp.callback_query(F.data.startswith("w:get_snapshot:"))
-    async def cb_get_snapshot(query: CallbackQuery, bot: Bot) -> None:
-        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
-        w = wc.get(wid)
-        if w is None:
-            await query.answer("Watcher not found.", show_alert=True)
-            return
-        _, text = engine._get_snapshot(wid)
-        if text is None:
-            await query.answer("No snapshot yet.", show_alert=True)
-            return
-        await query.answer()
-        chat_id = query.message.chat.id  # type: ignore[union-attr]
-        header = f"📋 <b>Snapshot: {_html.escape(w.name)}</b>\n\n"
-        # Telegram message limit is 4096 chars; send as file if too large.
-        MAX_MSG = 4000
-        truncated = len(text) > MAX_MSG
-        body = _html.escape(text[:MAX_MSG])
-        suffix = f"\n…<i>(truncated, {len(text)} chars total)</i>" if truncated else ""
-        await bot.send_message(chat_id, header + body + suffix, parse_mode="HTML")
 
     @dp.callback_query(F.data.startswith("w:delete:"))
     async def cb_delete(query: CallbackQuery) -> None:
@@ -955,6 +953,145 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
         }
         await query.answer()
 
+    # ── Model ──────────────────────────────────────────────────────────────────
+
+    @dp.callback_query(F.data.startswith("w:model:"))
+    async def cb_model(query: CallbackQuery) -> None:
+        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
+        w = wc.get(wid)
+        if w is None:
+            await query.answer("Watcher not found.", show_alert=True)
+            return
+        await query.message.delete()  # type: ignore[union-attr]
+        await query.message.answer(  # type: ignore[union-attr]
+            f"Current model: <code>{_html.escape(w.model)}</code>\n\nChoose a model:",
+            reply_markup=_model_kb(wid, w.model),
+            parse_mode="HTML",
+        )
+        _pending[query.message.chat.id] = {  # type: ignore[union-attr]
+            "action": "edit_model_pick",
+            "watcher_id": wid,
+            "return_to": "actions",
+        }
+        await query.answer()
+
+    @dp.callback_query(F.data.startswith("w:setmodel:"))
+    async def cb_setmodel(query: CallbackQuery, bot: Bot) -> None:
+        parts = query.data.split(":")  # type: ignore[union-attr]
+        wid, idx = parts[2], int(parts[3])
+        w = wc.get(wid)
+        if w is None:
+            await query.answer("Watcher not found.", show_alert=True)
+            return
+        if idx < 0 or idx >= len(wc.AVAILABLE_MODELS):
+            await query.answer("Unknown model.", show_alert=True)
+            return
+        w.model = wc.AVAILABLE_MODELS[idx]
+        wc.save(w)
+        _pending.pop(query.message.chat.id, None)  # type: ignore[union-attr]
+        with contextlib.suppress(Exception):
+            await query.message.delete()  # type: ignore[union-attr]
+        await query.answer(f"Model set: {w.model}")
+        await bot.send_message(
+            query.message.chat.id,  # type: ignore[union-attr]
+            f"{_watcher_info_text(w)}\n✅ Model updated.",
+            reply_markup=_actions_kb(w),
+            parse_mode="HTML",
+        )
+
+    # ── System prompt ──────────────────────────────────────────────────────────
+
+    @dp.callback_query(F.data.startswith("w:sysprompt:"))
+    async def cb_sysprompt(query: CallbackQuery) -> None:
+        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
+        w = wc.get(wid)
+        if w is None:
+            await query.answer("Watcher not found.", show_alert=True)
+            return
+        current = w.system_prompt.strip() or "(default)"
+        await query.message.delete()  # type: ignore[union-attr]
+        ask = await query.message.answer(  # type: ignore[union-attr]
+            f"Current system prompt:\n\n<code>{_html.escape(current)}</code>\n\n"
+            f"Send the new system prompt, or send <code>-</code> to reset to default:",
+            reply_markup=_input_cancel_kb(wid),
+            parse_mode="HTML",
+        )
+        _pending[query.message.chat.id] = {  # type: ignore[union-attr]
+            "action": "edit_sysprompt",
+            "watcher_id": wid,
+            "ask_msg_id": ask.message_id,
+            "return_to": "actions",
+        }
+        await query.answer()
+
+    # ── Tools (multi-select) ───────────────────────────────────────────────────
+
+    @dp.callback_query(F.data.startswith("w:tools:"))
+    async def cb_tools(query: CallbackQuery) -> None:
+        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
+        w = wc.get(wid)
+        if w is None:
+            await query.answer("Watcher not found.", show_alert=True)
+            return
+        selected = list(w.tools)
+        _pending[query.message.chat.id] = {  # type: ignore[union-attr]
+            "action": "edit_tools_pick",
+            "watcher_id": wid,
+            "selected": selected,
+            "return_to": "actions",
+        }
+        await query.message.delete()  # type: ignore[union-attr]
+        await query.message.answer(  # type: ignore[union-attr]
+            "Toggle tools, then tap Save:",
+            reply_markup=_tools_kb(wid, selected),
+        )
+        await query.answer()
+
+    @dp.callback_query(F.data.startswith("w:tt:"))
+    async def cb_toggle_tool(query: CallbackQuery) -> None:
+        parts = query.data.split(":")  # type: ignore[union-attr]
+        wid, idx = parts[2], int(parts[3])
+        chat_id = query.message.chat.id  # type: ignore[union-attr]
+        pending = _pending.get(chat_id)
+        if not pending or pending.get("action") != "edit_tools_pick" or pending.get("watcher_id") != wid:
+            await query.answer("Session expired.", show_alert=True)
+            return
+        if idx < 0 or idx >= len(wc.AVAILABLE_TOOLS):
+            await query.answer("Unknown tool.", show_alert=True)
+            return
+        tool = wc.AVAILABLE_TOOLS[idx]
+        selected: list[str] = list(pending["selected"])
+        if tool in selected:
+            selected.remove(tool)
+        else:
+            selected.append(tool)
+        pending["selected"] = selected
+        await query.message.edit_reply_markup(reply_markup=_tools_kb(wid, selected))  # type: ignore[union-attr]
+        await query.answer()
+
+    @dp.callback_query(F.data.startswith("w:tools_save:"))
+    async def cb_tools_save(query: CallbackQuery, bot: Bot) -> None:
+        wid = query.data.split(":", 2)[2]  # type: ignore[union-attr]
+        chat_id = query.message.chat.id  # type: ignore[union-attr]
+        pending = _pending.pop(chat_id, None)
+        w = wc.get(wid)
+        if w is None or not pending or pending.get("action") != "edit_tools_pick":
+            await query.answer("Session expired.", show_alert=True)
+            return
+        # Preserve order of AVAILABLE_TOOLS for stable serialisation.
+        chosen = [t for t in wc.AVAILABLE_TOOLS if t in pending.get("selected", [])]
+        w.tools = chosen
+        wc.save(w)
+        with contextlib.suppress(Exception):
+            await query.message.delete()  # type: ignore[union-attr]
+        await query.answer("Tools saved.")
+        await bot.send_message(
+            chat_id,
+            f"{_watcher_info_text(w)}\n✅ Tools updated.",
+            reply_markup=_actions_kb(w),
+            parse_mode="HTML",
+        )
+
     # ── Add watcher flow ───────────────────────────────────────────────────────
 
     @dp.callback_query(F.data == "w:add_watcher")
@@ -963,10 +1100,10 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
         _pending.pop(chat_id, None)
         await query.message.delete()  # type: ignore[union-attr]
         ask = await query.message.answer(  # type: ignore[union-attr]
-            "Send the URL to watch:",
+            "Send a name for this watcher:",
             reply_markup=_cancel_new_watcher_kb(),
         )
-        _pending[chat_id] = {"action": "new_watcher_url", "ask_msg_id": ask.message_id}
+        _pending[chat_id] = {"action": "new_watcher_name", "ask_msg_id": ask.message_id}
         await query.answer()
 
     @dp.callback_query(F.data == "w:cancel_new_watcher")
@@ -1000,7 +1137,6 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
         )
         _pending[chat_id] = {
             "action": "new_watcher_interval",
-            "url": pending["url"],
             "name": pending["name"],
             "unit": unit,
             "ask_msg_id": ask.message_id,
@@ -1019,14 +1155,13 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
         new_w = wc.WatcherConfig(
             id=secrets.token_hex(4),
             name=pending["name"],
-            url=pending["url"],
             interval=pending["interval"],
             enabled=True,
             created_at=datetime.now(timezone.utc).isoformat(),
             prompts=[],
         )
         wc.save(new_w)
-        log.info("new watcher created id=%s name=%r url=%r", new_w.id, new_w.name, new_w.url)
+        log.info("new watcher created id=%s name=%r", new_w.id, new_w.name)
         await bot.send_message(
             chat_id,
             _watcher_info_text(new_w),
@@ -1076,6 +1211,28 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             await bot.send_message(
                 message.chat.id,
                 f"{_watcher_info_text(w)}\n✅ Name updated.",
+                reply_markup=_actions_kb(w),
+                parse_mode="HTML",
+            )
+
+        # ── waiting for a new system prompt ────────────────────────────────────
+        elif action == "edit_sysprompt":
+            if not text:
+                await message.answer("Please send non-empty text, or '-' to reset.")
+                return
+            w = wc.get(pending["watcher_id"])
+            if w is None:
+                _pending.pop(message.chat.id, None)
+                await _cleanup_input()
+                return
+            w.system_prompt = "" if text.strip() == "-" else text
+            wc.save(w)
+            _pending.pop(message.chat.id, None)
+            await _cleanup_input()
+            note = "✅ System prompt reset to default." if not w.system_prompt else "✅ System prompt updated."
+            await bot.send_message(
+                message.chat.id,
+                f"{_watcher_info_text(w)}\n{note}",
                 reply_markup=_actions_kb(w),
                 parse_mode="HTML",
             )
@@ -1154,25 +1311,6 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             await _cleanup_input()
             await _render_prompts(bot, message.chat.id, wid)
 
-        # ── new watcher: waiting for URL ────────────────────────────────────────
-        elif action == "new_watcher_url":
-            if not text:
-                await message.answer("Please send a non-empty URL.")
-                return
-            suggested = _name_from_url(text)
-            await _cleanup_input()
-            ask = await bot.send_message(
-                message.chat.id,
-                f"Send a name for this watcher (suggested: <code>{_html.escape(suggested)}</code>):",
-                reply_markup=_cancel_new_watcher_kb(),
-                parse_mode="HTML",
-            )
-            _pending[message.chat.id] = {
-                "action": "new_watcher_name",
-                "url": text,
-                "ask_msg_id": ask.message_id,
-            }
-
         # ── new watcher: waiting for name ───────────────────────────────────────
         elif action == "new_watcher_name":
             if not text:
@@ -1186,7 +1324,6 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             )
             _pending[message.chat.id] = {
                 "action": "new_watcher_interval_unit",
-                "url": pending["url"],
                 "name": text,
                 "ask_msg_id": ask.message_id,
             }
@@ -1210,7 +1347,6 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             )
             _pending[message.chat.id] = {
                 "action": "new_watcher_prompt",
-                "url": pending["url"],
                 "name": pending["name"],
                 "interval": interval,
                 "ask_msg_id": ask.message_id,
@@ -1226,14 +1362,13 @@ def _build_dispatcher(chat_id: int, settings: Settings) -> Dispatcher:
             new_w = wc.WatcherConfig(
                 id=secrets.token_hex(4),
                 name=pending["name"],
-                url=pending["url"],
                 interval=pending["interval"],
                 enabled=True,
                 created_at=datetime.now(timezone.utc).isoformat(),
                 prompts=[text],
             )
             wc.save(new_w)
-            log.info("new watcher created id=%s name=%r url=%r", new_w.id, new_w.name, new_w.url)
+            log.info("new watcher created id=%s name=%r", new_w.id, new_w.name)
             await bot.send_message(
                 message.chat.id,
                 _watcher_info_text(new_w),

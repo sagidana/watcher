@@ -1,11 +1,10 @@
 """
-Send Telegram notifications when a watched element changes.
+Send Telegram notifications with the cai output for a watcher.
 """
 
 from __future__ import annotations
 
 import logging
-from difflib import unified_diff
 
 from aiogram import Bot
 
@@ -14,39 +13,7 @@ from .watchers_config import WatcherConfig
 
 log = logging.getLogger("watcher.notifier")
 
-_MAX_LINES = 10
 _MAX_MSG = 4000  # Telegram max message length (4096, leave headroom)
-
-
-def _split_diff_lines(old_text: str, new_text: str) -> tuple[list[str], list[str]]:
-    """Return (added_lines, removed_lines) from a unified diff, deduplicated."""
-    raw = list(unified_diff(old_text.splitlines(), new_text.splitlines(), lineterm=""))
-    seen_added: set[str] = set()
-    seen_removed: set[str] = set()
-    added, removed = [], []
-    for l in raw:
-        if l.startswith("+") and not l.startswith("+++"):
-            line = l[1:]
-            if line not in seen_added:
-                seen_added.add(line)
-                added.append(line)
-        elif l.startswith("-") and not l.startswith("---"):
-            line = l[1:]
-            if line not in seen_removed:
-                seen_removed.add(line)
-                removed.append(line)
-    return added, removed
-
-
-def build_short_diff(old_text: str, new_text: str, max_lines: int = _MAX_LINES) -> str:
-    """Return a compact diff string with added/removed lines (no context lines)."""
-    added, removed = _split_diff_lines(old_text, new_text)
-    parts: list[str] = []
-    if added:
-        parts.append("Added:\n" + "\n".join(f"+ {l}" for l in added[:max_lines]))
-    if removed:
-        parts.append("Removed:\n" + "\n".join(f"- {l}" for l in removed[:max_lines]))
-    return "\n".join(parts) if parts else "(content changed but diff is empty)"
 
 
 async def notify_change(
@@ -54,8 +21,8 @@ async def notify_change(
     watcher: WatcherConfig,
     text: str,
 ) -> None:
-    """Send a Telegram notification for a watcher change."""
-    msg = f"{watcher.name}\n{watcher.url}\n\n{text}"
+    """Send a Telegram notification with the watcher's cai output."""
+    msg = f"{watcher.name}\n\n{text}"
 
     if len(msg) > _MAX_MSG:
         msg = msg[:_MAX_MSG] + "\n…"
@@ -71,5 +38,3 @@ async def notify_change(
         log.exception("Failed to send Telegram notification for watcher %s", watcher.id)
     finally:
         await bot.session.close()
-
-

@@ -18,15 +18,33 @@ log = logging.getLogger("watcher.engine")
 WATCHERS_DIR = Path("~/.config/watcher/watchers").expanduser()
 
 
+AVAILABLE_MODELS: list[str] = [
+    "google/gemini-3-flash-preview",
+    "anthropic/claude-opus-4.7",
+    "anthropic/claude-opus-4.6",
+    "google/gemini-pro-latest",
+    "openai/gpt-5.5",
+    "google/gemma-4-31b-it",
+]
+
+DEFAULT_MODEL: str = AVAILABLE_MODELS[0]
+
+AVAILABLE_TOOLS: list[str] = ["fetch_url"]
+
+DEFAULT_TOOLS: list[str] = ["fetch_url"]
+
+
 @dataclass
 class WatcherConfig:
     id: str                  # 8-char hex (secrets.token_hex(4))
     name: str
-    url: str
     interval: int = 30
     enabled: bool = True
     created_at: str = ""              # ISO-8601, filled by caller
-    prompts: list[str] = field(default_factory=list)  # ordered cai filter prompts (chain)
+    prompts: list[str] = field(default_factory=list)  # ordered cai prompts (chain)
+    model: str = DEFAULT_MODEL
+    system_prompt: str = ""           # empty -> engine substitutes default at run time
+    tools: list[str] = field(default_factory=lambda: list(DEFAULT_TOOLS))
 
 
 def _load_prompts(data: dict) -> list[str]:
@@ -38,6 +56,29 @@ def _load_prompts(data: dict) -> list[str]:
     if "prompt" in data and data["prompt"]:
         return [str(data["prompt"])]
     return []
+
+
+def _load_tools(data: dict) -> list[str]:
+    raw = data.get("tools")
+    if isinstance(raw, list):
+        return [str(t) for t in raw if t]
+    if isinstance(raw, str) and raw.strip():
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    return list(DEFAULT_TOOLS)
+
+
+def _from_dict(data: dict) -> WatcherConfig:
+    return WatcherConfig(
+        id=str(data["id"]),
+        name=str(data.get("name", data["id"])),
+        interval=int(data.get("interval", 30)),
+        enabled=bool(data.get("enabled", True)),
+        created_at=str(data.get("created_at", "")),
+        prompts=_load_prompts(data),
+        model=str(data.get("model") or DEFAULT_MODEL),
+        system_prompt=str(data.get("system_prompt", "")),
+        tools=_load_tools(data),
+    )
 
 
 def _path(watcher_id: str) -> Path:
@@ -53,17 +94,7 @@ def load_all() -> list[WatcherConfig]:
             data = yaml.safe_load(f.read_text())
             if not isinstance(data, dict):
                 continue
-            watchers.append(
-                WatcherConfig(
-                    id=str(data["id"]),
-                    name=str(data.get("name", data["id"])),
-                    url=str(data["url"]),
-                    interval=int(data.get("interval", 30)),
-                    enabled=bool(data.get("enabled", True)),
-                    created_at=str(data.get("created_at", "")),
-                    prompts=_load_prompts(data),
-                )
-            )
+            watchers.append(_from_dict(data))
         except Exception as e:
             log.warning(f"failed to load config {f}: {e=}")
 
@@ -76,13 +107,15 @@ def save(w: WatcherConfig) -> None:
     data = {
         "id": w.id,
         "name": w.name,
-        "url": w.url,
         "interval": w.interval,
         "enabled": w.enabled,
         "created_at": w.created_at,
+        "model": w.model,
+        "system_prompt": w.system_prompt,
+        "tools": w.tools,
         "prompts": w.prompts,
     }
-    _path(w.id).write_text(yaml.dump(data, allow_unicode=True, default_flow_style=False))
+    _path(w.id).write_text(yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False))
 
 
 def delete(watcher_id: str) -> bool:
@@ -102,12 +135,4 @@ def get(watcher_id: str) -> Optional[WatcherConfig]:
     data = yaml.safe_load(p.read_text())
     if not isinstance(data, dict):
         return None
-    return WatcherConfig(
-        id=str(data["id"]),
-        name=str(data.get("name", data["id"])),
-        url=str(data["url"]),
-        interval=int(data.get("interval", 30)),
-        enabled=bool(data.get("enabled", True)),
-        created_at=str(data.get("created_at", "")),
-        prompts=_load_prompts(data),
-    )
+    return _from_dict(data)
